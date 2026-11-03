@@ -52,7 +52,8 @@ def as_bool(col: pd.Series) -> pd.Series:
 
 def load_all() -> pd.DataFrame:
     frames = []
-    for p in sorted((ROOT / "history").glob("*.csv")):
+    files = sorted((ROOT / "history").glob("*.csv")) + sorted(ROOT.glob("sheets_import_*.csv"))   # root copy if uploaded flat
+    for p in files:
         frames.append(pd.read_csv(p, dtype={"rank": str}))
     bt = ROOT / "backtest" / "backtest.csv.gz"
     if bt.exists():

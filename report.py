@@ -10,7 +10,9 @@ from pathlib import Path
 import config as C
 
 ROOT = Path(__file__).resolve().parent
-TPL = ROOT / "templates"
+# Templates normally live in templates/. If the files were uploaded without the folder
+# (GitHub's web upload can flatten folders), they are found in the repository root instead.
+TPL = ROOT / "templates" if (ROOT / "templates" / "dashboard_template.html").exists() else ROOT
 
 
 def _cfg() -> str:
