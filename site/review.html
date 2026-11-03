@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FVG Review</title><link rel="stylesheet" href="style.css"><script>window.CFG = {"repo": "Ron1415/fvg-scanner", "branch": "main", "workflow": "fvg.yml"};</script><script src="store.js"></script>
+</head><body><div class="wrap">
+<h1>FVG Strategy Review</h1>
+<div class="sub" id="sub">Loading…</div>
+<div class="toplinks"><a href="index.html">Dashboard</a><a href="universe.html">Universe</a>
+<a href="#" data-run="backtest">Run 6-month backtest</a><a href="#" data-run="eod">Run end-of-day review now</a></div>
+<div id="tokenPanel"></div>
+<div id="banner" class="banner">All results are hypothetical: conservative fills (stop first when a bar touches both), net of the
+modelled costs, no guarantee of future results.</div>
+<div class="card" id="meta"></div>
+<div id="tables"></div>
+<div class="card tbl"><b>Automatic changes (config_changes.json)</b><div id="changes" class="hint">None yet.</div></div>
+<div class="foot">Educational tool only; not financial advice.</div>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+async function j(p) { try { const r = await fetch(`${p}?t=${Date.now()}`, {cache: "no-store"}); return r.ok ? r.json() : null; } catch (e) { return null; } }
+(async () => {
+  const rv = await j("data/review.json"), meta = await j("data/backtest_meta.json"), ch = await j("data/config_changes.json");
+  if (!rv) { $("#sub").textContent = "No review yet. Run the end-of-day review or the backtest."; return; }
+  $("#sub").textContent = `Generated ${rv.generated} (${rv.kind}) · ${rv.sessions} sessions ${rv.range.length ? "(" + rv.range.join(" to ") + ")" : ""} · config v${rv.config_version}`;
+  $("#meta").innerHTML = meta ? `<b>Last backtest</b>: run ${esc(meta.run_at)}, sessions ${esc(meta.sessions.join(" to "))}, ${meta.symbols} symbols,
+    ${meta.setups} setups. Stocks/ETFs: ${esc(meta.stock_source)}. Futures: ${esc(meta.futures_source)}.` : "No backtest has been run yet.";
+  $("#tables").innerHTML = rv.tables.map(t => `<div class="card tbl"><b>${esc(t.title)}</b>${t.note ? `<div class="hint">${esc(t.note)}</div>` : ""}
+    <table><tr>${t.head.map(h => `<th>${esc(h)}</th>`).join("")}</tr>${t.rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join("")}</tr>`).join("")}</table></div>`).join("");
+  if (ch && ch.length) $("#changes").innerHTML = `<table><tr><th>When</th><th>Version</th><th>Setting</th><th>Old</th><th>New</th><th>Evidence</th></tr>${ch.slice().reverse()
+    .map(c => `<tr><td>${esc(c.changed_at)}</td><td>${c.version}</td><td>${esc(c.section + "." + c.key)}</td><td>${esc(c.old)}</td><td>${esc(c.new)}</td><td>${esc(c.why)}</td></tr>`).join("")}</table>`;
+})();
+document.querySelectorAll("[data-run]").forEach(a => a.onclick = async e => { e.preventDefault();
+  const inputs = a.dataset.run === "backtest" ? {mode: "backtest", backtest_days: "125"} : {mode: "eod"};
+  try { await Store.dispatch(inputs); $("#banner").textContent = `Started. ${a.dataset.run === "backtest" ? "A 6-month backtest takes about 30-90 minutes." : "Reload in about 10 minutes."}`; }
+  catch (err) { $("#banner").textContent = err.message; } });
+Store.mountSettings($("#tokenPanel"));
+</script></body></html>
