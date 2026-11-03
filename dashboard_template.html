@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FVG Scanner</title><link rel="stylesheet" href="style.css"><script>window.CFG = __CFG__;</script><script src="store.js"></script>
+</head><body><div class="wrap">
+<h1>FVG Opening-Range Scanner</h1>
+<div class="sub" id="sub">Loading the latest scan…</div>
+<div class="toplinks"><a href="review.html">Review and backtest</a><a href="#" id="runNow">Run a scan now</a><a href="universe.html">Universe</a></div>
+<div class="settings">Account size $<input id="acct" type="number" min="0" step="100" style="width:120px">
+<span class="hint">Used to suggest size at __RISK__% risk per trade (contracts for futures).</span></div>
+<div id="tokenPanel"></div>
+<div id="banner" class="banner"></div>
+<nav><button data-tab="setups" class="on">Top setups</button><button data-tab="open">Open trades</button>
+<button data-tab="journal">Journal</button></nav>
+<section id="tab-setups"></section>
+<section id="tab-open" hidden></section>
+<section id="tab-journal" hidden></section>
+<div class="foot">The Setup Score is a rules-based confluence score, not a calibrated win probability. The page refreshes
+every 15 minutes during market hours (GitHub schedules can run a few minutes late). Prices come from Yahoo Finance and may be
+delayed; confirm the fill before you save a trade. Educational tool only; not financial advice.</div>
+</div>
+
+<dialog id="dlg"><form method="dialog">
+<h3 id="dlgTitle"></h3><div class="hint" id="dlgSub"></div>
+<label>Fill price <span id="pxHint" class="hint"></span></label><input id="fPrice" type="number" step="0.0001" required>
+<div id="openFields"><label id="sharesLbl">Shares</label><input id="fShares" type="number" step="1" min="0"></div>
+<div id="closeFields"><label>Exit reason</label><select id="fReason">
+<option>Target 1</option><option>Target 2</option><option>Stop</option><option>Breakeven stop</option>
+<option>Manual / discretionary</option><option>Time stop</option></select></div>
+<label>Comment (optional)</label><textarea id="fComment" rows="2"></textarea>
+<div class="actions"><button class="btn" value="ok">Confirm</button><button class="btn ghost" value="cancel" formnovalidate>Cancel</button></div>
+</form></dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+let S = null, T = [], ctx = null;
+const f2 = v => v == null || v === "" || isNaN(v) ? "—" : Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const fr = v => v == null || isNaN(v) ? "—" : `<span class="${v > 0 ? "pos" : v < 0 ? "neg" : ""}">${v > 0 ? "+" : ""}${Number(v).toFixed(2)}R</span>`;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const acct = () => Number(Store.ls.get("acct") || 0);
+const rOf = (t, px) => { const risk = Math.abs(t.entry_price - t.stop); if (!risk || px == null) return null;
+  return (t.side === "LONG" ? px - t.entry_price : t.entry_price - px) / risk; };
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll("section").forEach(s => s.hidden = s.id !== "tab-" + b.dataset.tab);
+});
+
+function chart(s) {
+  const bars = s.bars || [], n = bars.length; if (!n) return "";
+  const W = 640, Hh = 280, padL = 8, padR = 92, padT = 10, padB = 18, lv = s.levels || {};
+  const core = [s.entry, s.stop, s.t1, s.fvg_lo, s.fvg_hi, s.ote_lo, s.ote_hi];
+  let lo = Math.min(...bars.map(b => b[2]), ...core), hi = Math.max(...bars.map(b => b[1]), ...core);
+  const span = hi - lo; lo -= span * .04; hi += span * .04;
+  ["PDH", "PDL", "ORH", "ORL", "PMH", "PML"].forEach(k => { const v = lv[k];
+    if (v != null && v >= lo - span * .15 && v <= hi + span * .15) { lo = Math.min(lo, v); hi = Math.max(hi, v); } });
+  if (s.t2 >= lo - span * .2 && s.t2 <= hi + span * .2) { lo = Math.min(lo, s.t2); hi = Math.max(hi, s.t2); }
+  const pw = W - padL - padR, ph = Hh - padT - padB;
+  const X = i => padL + (i + .5) * pw / n, Y = v => padT + (hi - v) / (hi - lo) * ph, bw = Math.max(1.5, pw / n * .6);
+  const p = [`<svg viewBox="0 0 ${W} ${Hh}" class="chart" role="img" aria-label="${s.ticker} 5-minute chart with setup levels">`];
+  const x0 = X(s.fvg_idx - 1) - bw / 2, xs = X(s.sweep_idx) - bw / 2;
+  p.push(`<rect x="${x0}" y="${Y(s.fvg_hi)}" width="${padL + pw - x0}" height="${Math.max(1, Y(s.fvg_lo) - Y(s.fvg_hi))}" class="z-fvg"/>`);
+  p.push(`<rect x="${xs}" y="${Y(s.ote_hi)}" width="${padL + pw - xs}" height="${Math.max(1, Y(s.ote_lo) - Y(s.ote_hi))}" class="z-ote"/>`);
+  bars.forEach(([o, h, l, c], i) => { const cls = c >= o ? "up" : "dn", x = X(i), t = Y(Math.max(o, c)), b = Y(Math.min(o, c));
+    p.push(`<line x1="${x}" x2="${x}" y1="${Y(h)}" y2="${Y(l)}" class="w-${cls}"/><rect x="${x - bw / 2}" y="${t}" width="${bw}" height="${Math.max(1, b - t)}" class="b-${cls}"/>`); });
+  const orBars = bars.filter(b => b[4] < 600).length;
+  if (orBars > 0 && orBars < n) { const xo = padL + orBars * pw / n;
+    p.push(`<line x1="${xo}" x2="${xo}" y1="${padT}" y2="${padT + ph}" class="l-or-end"/><text x="${xo + 3}" y="${padT + ph + 13}" class="ax">10:00</text>`); }
+  const lines = [["Entry", s.entry, "l-entry"], ["Stop", s.stop, "l-stop"], ["T1", s.t1, "l-tgt"], ["T2", s.t2, "l-tgt"],
+    ["EQ 50%", s.eq, "l-eq"], ["OTE 70.5", s.ote_mid, "l-ote"], ["ORH", lv.ORH, "l-or"], ["ORL", lv.ORL, "l-or"],
+    ["PDH", lv.PDH, "l-pd"], ["PDL", lv.PDL, "l-pd"], ["PMH", lv.PMH, "l-pm"], ["PML", lv.PML, "l-pm"]]
+    .filter(r => r[1] != null && r[1] >= lo && r[1] <= hi).sort((a, b) => Y(a[1]) - Y(b[1]));
+  let lastY = -99;
+  lines.forEach(([nm, v, cl]) => { const y = Y(v), ly = Math.max(y + 3.5, lastY + 11); lastY = ly;
+    p.push(`<line x1="${padL}" x2="${padL + pw}" y1="${y}" y2="${y}" class="${cl}"/><text x="${padL + pw + 4}" y="${ly}" class="lbl ${cl}-t">${nm} ${f2(v)}</text>`); });
+  p.push("</svg>"); return p.join("");
+}
+
+function card(s, i) {
+  const prox = s.proximity >= .999 ? "At / inside entry zone" : `${s.dist_pct.toFixed(2)}% from entry`, lv = s.levels;
+  const taken = T.some(t => t.key === s.key && t.exit_price == null);
+  const rows = [["Prior-day high (PDH)", lv.PDH], ["Prior-day low (PDL)", lv.PDL], ["Pre-market / overnight high (PMH)", lv.PMH],
+    ["Pre-market / overnight low (PML)", lv.PML], ["Opening-range high (ORH)", lv.ORH], ["Opening-range low (ORL)", lv.ORL],
+    ["Sweep extreme", s.extreme], ["Swing extreme", s.swing], ["MSS level", s.mss], ["FVG high", s.fvg_hi], ["FVG CE", s.ce],
+    ["FVG low", s.fvg_lo], ["Equilibrium", s.eq], ["OTE 62%", s.ote_a], ["OTE 70.5%", s.ote_mid], ["OTE 79%", s.ote_b]]
+    .map(([k, v]) => `<tr><td>${k}</td><td>${f2(v)}</td></tr>`).join("");
+  return `<div class="card"><div class="head"><span class="rank">#${i + 1}</span><span class="tk">${esc(s.ticker)}</span>
+  <span class="side ${s.side}">${s.side}</span><span class="tag">${s.asset}</span><span class="tag">${s.status}</span><span class="tag">${prox}</span>
+  <div class="score"><div><b>${s.score}</b> / 100 Setup Score</div><div class="meter"><i style="width:${s.score}%"></i></div></div></div>
+  <div class="grid"><div class="k"><span>Last price</span><b>${f2(s.price)}</b></div><div class="k entry"><span>Ideal entry</span><b>${f2(s.entry)}</b></div>
+  <div class="k stop"><span>Stop</span><b>${f2(s.stop)}</b></div><div class="k tgt"><span>Target 1</span><b>${f2(s.t1)}</b></div>
+  <div class="k tgt"><span>Target 2</span><b>${f2(s.t2)}</b></div><div class="k"><span>R:R (T1 / T2)</span><b>${s.rr1.toFixed(1)} / ${s.rr2.toFixed(1)}</b></div>
+  <div class="k"><span>Risk per ${s.mult > 1 ? "contract" : "share"}</span><b>${f2(Math.abs(s.entry - s.stop) * (s.mult || 1))}</b></div></div>
+  ${chart(s)}<div class="notes">${s.notes.map(n => `<span class="tag">${esc(n)}</span>`).join("")}</div>
+  <div class="actions"><button class="btn take ${s.side}" data-take="${esc(s.key)}">Take ${s.side.toLowerCase()} trade</button>
+  ${taken ? '<span class="taken">You have an open trade on this setup</span>' : ""}</div>
+  <details><summary>All levels</summary><table>${rows}</table></details></div>`;
+}
+
+function render() {
+  if (!S) return;
+  $("#sub").textContent = `Updated ${S.updated} · ${S.scanned} symbols · ${S.total} setups meet the plan · top ${S.top.length} shown · config v${S.config_version}`;
+  const ageMin = (Date.now() - new Date(S.updated_iso).getTime()) / 60000;
+  $("#banner").className = "banner" + (ageMin > 40 ? " warn" : "");
+  $("#banner").textContent = ageMin > 40 ? `This scan is ${Math.round(ageMin)} minutes old (market closed, or the scheduled run is late).` :
+    "Training mode: the scanner records every setup all day; the end-of-day replay drives the learning.";
+  if (document.activeElement !== $("#acct")) $("#acct").value = acct() || "";
+  const open = T.filter(t => t.exit_price == null), closed = T.filter(t => t.exit_price != null);
+  document.querySelector('[data-tab="open"]').textContent = `Open trades (${open.length})`;
+  document.querySelector('[data-tab="journal"]').textContent = `Journal (${closed.length})`;
+  $("#tab-setups").innerHTML = S.top.length ? S.top.map(card).join("") :
+    `<div class="card empty">No setups meet the plan right now${S.filtered ? ` (${S.filtered} weaker setups were filtered out and recorded)` : ""}. No trade is a valid outcome.</div>`;
+  $("#tab-open").innerHTML = open.length ? `<div class="card tbl"><table><tr><th>Ticker</th><th>Side</th><th>Opened</th><th>Fill</th><th>Size</th><th>Stop</th>
+    <th>T1</th><th>T2</th><th>Last</th><th>Open R</th><th>Score</th><th></th></tr>${open.map(t => { const px = S.prices[t.ticker]; const r = rOf(t, px);
+      const long = t.side === "LONG", al = px == null ? "" : (long ? px <= t.stop : px >= t.stop) ? "At / beyond stop" :
+        (long ? px >= t.t2 : px <= t.t2) ? "Target 2 reached" : (long ? px >= t.t1 : px <= t.t1) ? "Target 1 reached" : "";
+      return `<tr><td><b>${esc(t.ticker)}</b></td><td>${t.side}</td><td>${esc(t.opened_at.slice(5, 16).replace("T", " "))}</td><td>${f2(t.entry_price)}</td>
+      <td>${t.shares ?? "—"}</td><td>${f2(t.stop)}</td><td>${f2(t.t1)}</td><td>${f2(t.t2)}</td><td>${f2(px)}</td><td>${fr(r)}${al ? `<span class="alert">${al}</span>` : ""}</td>
+      <td>${t.score}</td><td><button class="btn close sm" data-close="${t.id}">Close trade</button> <button class="btn ghost sm" data-del="${t.id}">Delete</button></td></tr>`; }).join("")}</table></div>`
+    : '<div class="card empty">No open trades.</div>';
+  const rs = closed.map(t => rOf(t, t.exit_price)).filter(x => x != null);
+  $("#tab-journal").innerHTML = (rs.length ? `<div class="card"><div class="statgrid"><div class="k"><span>Closed trades</span><b>${rs.length}</b></div>
+    <div class="k"><span>Win rate</span><b>${Math.round(rs.filter(x => x > 0).length / rs.length * 100)}%</b></div>
+    <div class="k"><span>Average</span><b>${fr(rs.reduce((a, b) => a + b, 0) / rs.length)}</b></div>
+    <div class="k"><span>Total</span><b>${fr(rs.reduce((a, b) => a + b, 0))}</b></div></div>
+    <p class="hint">The full analysis, including every setup you did not take, is on the <a href="review.html">Review</a> page.</p></div>` : "") +
+    (closed.length ? `<div class="card tbl"><table><tr><th>Ticker</th><th>Side</th><th>Opened</th><th>Closed</th><th>Fill</th><th>Exit</th><th>Reason</th><th>Result</th><th>P&amp;L</th><th>Score</th></tr>
+    ${closed.slice().reverse().map(t => { const r = rOf(t, t.exit_price), pnl = t.shares ? (t.side === "LONG" ? t.exit_price - t.entry_price : t.entry_price - t.exit_price) * t.shares * (t.mult || 1) : null;
+      return `<tr><td><b>${esc(t.ticker)}</b></td><td>${t.side}</td><td>${esc(t.opened_at.slice(5, 16).replace("T", " "))}</td><td>${esc((t.exit_at || "").slice(11, 16))}</td>
+      <td>${f2(t.entry_price)}</td><td>${f2(t.exit_price)}</td><td>${esc(t.exit_reason)}</td><td>${fr(r)}</td><td>${pnl == null ? "—" : "$" + f2(pnl)}</td><td>${t.score}</td></tr>`; }).join("")}</table></div>`
+    : '<div class="card empty">Closed trades will appear here.</div>');
+}
+
+async function refresh() {
+  try { S = await (await fetch(`data/state.json?t=${Date.now()}`, {cache: "no-store"})).json(); } catch (e) { $("#sub").textContent = "No scan yet."; }
+  try { T = await Store.load(); } catch (e) { $("#banner").textContent = e.message; }
+  render();
+}
+
+const nowIso = () => new Date().toISOString();
+async function openDialog(kind, obj) {
+  ctx = {kind, obj};
+  const long = obj.side === "LONG", tk = obj.ticker, mult = obj.mult || 1;
+  $("#dlgTitle").textContent = `${kind === "open" ? "Take" : "Close"} ${obj.side.toLowerCase()}: ${tk}`;
+  $("#dlgSub").textContent = kind === "open" ? `Plan: entry ${f2(obj.entry)} · stop ${f2(obj.stop)} · T1 ${f2(obj.t1)} · T2 ${f2(obj.t2)}`
+    : `Filled ${f2(obj.entry_price)} · stop ${f2(obj.stop)} · T1 ${f2(obj.t1)} · T2 ${f2(obj.t2)}`;
+  $("#openFields").hidden = kind !== "open"; $("#closeFields").hidden = kind !== "close"; $("#fComment").value = "";
+  const last = S.prices[tk] ?? obj.price;
+  $("#fPrice").value = last != null ? Number(last).toFixed(2) : ""; $("#pxHint").textContent = "(fetching live price…)";
+  if (kind === "open") { const risk = Math.abs(obj.entry - obj.stop);
+    $("#fShares").value = acct() && risk > 0 ? Math.floor(acct() * __RISK__ / 100 / (risk * mult)) : "";
+    $("#sharesLbl").textContent = mult > 1 ? `Contracts ($${mult.toLocaleString()} per point)` : "Shares"; }
+  $("#dlg").showModal();
+  const q = await Store.quote(tk);
+  if (q) { $("#fPrice").value = q.toFixed(2); $("#pxHint").textContent = "(live price captured; edit if your fill differs)"; }
+  else $("#pxHint").textContent = "(last scanned price; edit to your actual fill)";
+  if (kind === "close") { const p = +$("#fPrice").value, hit = l => long ? p >= l : p <= l;
+    $("#fReason").value = hit(obj.t2) ? "Target 2" : hit(obj.t1) ? "Target 1" : (long ? p <= obj.stop : p >= obj.stop) ? "Stop" : "Manual / discretionary"; }
+}
+
+$("#dlg").addEventListener("close", async () => {
+  if ($("#dlg").returnValue !== "ok" || !ctx) { ctx = null; return; }
+  const c = ctx; ctx = null;
+  const price = parseFloat($("#fPrice").value), comment = $("#fComment").value;
+  $("#banner").textContent = "Saving…";
+  try {
+    if (c.kind === "open") {
+      const s = c.obj;
+      await Store.update(tr => tr.push({id: Date.now(), key: s.key, ticker: s.ticker, side: s.side, asset: s.asset, mult: s.mult || 1,
+        opened_at: nowIso(), entry_price: price, shares: $("#fShares").value ? +$("#fShares").value : null, planned_entry: s.entry,
+        stop: s.stop, t1: s.t1, t2: s.t2, score: s.score, comment_open: comment,
+        setup: {status: s.status, rr1: s.rr1, rr2: s.rr2, swept: s.swept, bias: s.bias, overlap: s.overlap, rvol: s.rvol,
+                pts: s.pts, notes: s.notes, levels: s.levels, fvg_lo: s.fvg_lo, fvg_hi: s.fvg_hi, ce: s.ce, extreme: s.extreme,
+                swing: s.swing, proximity: s.proximity, config_version: S.config_version}}), `Open ${s.side} ${s.ticker}`);
+    } else {
+      await Store.update(tr => { const t = tr.find(x => x.id === c.obj.id); if (t) Object.assign(t, {exit_price: price, exit_at: nowIso(),
+        exit_reason: $("#fReason").value, comment_close: comment}); }, `Close ${c.obj.ticker}`);
+    }
+    await refresh();
+  } catch (e) { $("#banner").className = "banner warn"; $("#banner").textContent = "Could not save: " + e.message; }
+});
+
+document.addEventListener("click", async e => {
+  const t = e.target.closest("[data-take],[data-close],[data-del]"); if (!t || !S) return;
+  if (t.dataset.take) openDialog("open", S.top.find(s => s.key === t.dataset.take));
+  if (t.dataset.close) openDialog("close", T.find(x => String(x.id) === t.dataset.close));
+  if (t.dataset.del) {
+    if (t.dataset.armed) { await Store.update(tr => { const i = tr.findIndex(x => String(x.id) === t.dataset.del); if (i >= 0) tr.splice(i, 1); }, "Delete trade"); refresh(); }
+    else { t.dataset.armed = 1; t.textContent = "Confirm delete"; setTimeout(() => { t.dataset.armed = ""; t.textContent = "Delete"; }, 4000); }
+  }
+});
+$("#acct").onchange = () => { Store.ls.set("acct", $("#acct").value); };
+$("#runNow").onclick = async e => { e.preventDefault();
+  try { await Store.dispatch({mode: "live"}); $("#banner").textContent = "Scan started. Reload in about 3 minutes."; }
+  catch (err) { $("#banner").textContent = err.message; } };
+Store.mountSettings($("#tokenPanel"), refresh);
+refresh();
+setInterval(() => { if (!$("#dlg").open) refresh(); }, 60000);
+</script></body></html>

@@ -1,0 +1,58 @@
+[
+ {
+  "id": 1,
+  "key": "2026-11-02|XLP|SHORT|0950",
+  "ticker": "XLP",
+  "side": "SHORT",
+  "asset": "ETF",
+  "mult": 1,
+  "opened_at": "2026-11-02T11:49:54-05:00",
+  "entry_price": 90.28,
+  "shares": null,
+  "planned_entry": 90.28424827575684,
+  "stop": 90.5735576248169,
+  "t1": 89.73999786376953,
+  "t2": 89.17500305175781,
+  "score": 74,
+  "comment_open": "Imported from the Google Sheets journal",
+  "setup": {
+   "status": "Pending",
+   "rr1": 1.881205753479876,
+   "rr2": 3.8341146858988666,
+   "swept": "PDH/PMH",
+   "bias": "Bullish",
+   "overlap": true,
+   "rvol": 1.4109879392373592,
+   "notes": [
+    "Swept PDH",
+    "MSS confirmed",
+    "FVG in premium",
+    "FVG overlaps OTE",
+    "R:R 1.9 to T1",
+    "Against HTF (bullish)",
+    "Outside 10:00-11:30 window"
+   ],
+   "levels": {
+    "PDH": 90.37999725341797,
+    "PDL": 89.17500305175781,
+    "PMH": 89.772,
+    "PML": 89.07,
+    "ORH": 90.55999755859375,
+    "ORL": 89.83499908447266,
+    "fvgLo": 90.20500183105469,
+    "fvgHi": 90.32009887695312,
+    "ce": 90.2625503540039,
+    "eq": 90.14999771118164,
+    "ote62": 90.24839767456055,
+    "ote705": 90.31809764862061,
+    "ote79": 90.38779762268067,
+    "sweepExtreme": 90.55999755859375,
+    "swingExtreme": 89.73999786376953,
+    "mssLevel": 89.83499908447266
+   }
+  },
+  "exit_price": 90.8,
+  "exit_at": "2026-11-02T14:10:09.092000-05:00",
+  "exit_reason": "Stop"
+ }
+]

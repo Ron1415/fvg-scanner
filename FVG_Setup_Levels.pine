@@ -1,0 +1,490 @@
+//@version=6
+// FVG Opening-Range Setup Levels
+// Draws the same levels and trade zones as the FVG scanner dashboard:
+// prior-day, pre-market and opening-range highs/lows, the liquidity sweep,
+// market structure shift (MSS), displacement FVG, equilibrium, OTE zone,
+// entry, stop and targets. Built for 5-minute charts of US stocks and ETFs.
+// The Setup Score is a rules-based confluence score, not a win probability.
+// Educational tool only; not financial advice.
+indicator("FVG Opening-Range Setup Levels", shorttitle = "FVG Setup", overlay = true,
+     max_lines_count = 100, max_boxes_count = 20, max_labels_count = 60)
+
+// ---------------------------------------------------------------- inputs
+sideMode   = input.string("Auto (best)", "Setup side", options = ["Auto (best)", "Long only", "Short only"])
+showFailed = input.bool(false, "Show setups that fail the plan filters")
+showLevels = input.bool(true, "Show PDH/PDL, PMH/PML, ORH/ORL")
+showTable  = input.bool(true, "Show setup table")
+minRR1     = input.float(1.0, "Minimum R:R to Target 1", step = 0.1)
+minRR2     = input.float(2.0, "Minimum R:R to Target 2", step = 0.1)
+extendBars = input.int(12, "Extend lines to the right (bars)", minval = 1)
+
+// ---------------------------------------------------------------- constants
+NY = "America/New_York"
+RTH_OPEN = 570
+OR_END = 600
+WINDOW_END = 690
+RTH_CLOSE = 960
+PRE_START = 240
+
+cEntry = color.new(#2f6fde, 0)
+cStop  = color.new(#d64545, 0)
+cTgt   = color.new(#1a9e6a, 0)
+cEq    = color.new(#8a93a0, 0)
+cOte   = color.new(#c58a00, 0)
+cPd    = color.new(#8b5cf6, 0)
+cOr    = color.new(#e07b00, 0)
+cPm    = color.new(#0e9aa7, 0)
+
+// ---------------------------------------------------------------- types
+type Setup
+    bool  ok      = false
+    int   s       = 0
+    int   m       = 0
+    int   fi      = 0
+    float extreme = na
+    float swing   = na
+    float mss     = na
+    float fvgA    = na
+    float fvgB    = na
+    float ce      = na
+    float eq      = na
+    float oteA    = na
+    float oteMid  = na
+    float oteB    = na
+    bool  overlap = false
+    float entry   = na
+    float stop    = na
+    float t1      = na
+    float t2      = na
+    float rr1     = na
+    float rr2     = na
+    string status = ""
+    float rvol    = 1.0
+    string swept  = ""
+
+// ---------------------------------------------------------------- session tracking
+mins   = hour(time, NY) * 60 + minute(time, NY)
+isRth  = mins >= RTH_OPEN and mins < RTH_CLOSE
+// Futures: the session starts at 6:00 PM ET and PMH/PML is the overnight (Globex) range.
+isFut  = syminfo.type == "futures"
+prevMins = nz(hour(time[1], NY) * 60 + minute(time[1], NY), -1)
+isPre  = isFut ? (not isRth and (mins >= 1080 or mins < RTH_OPEN)) : (mins >= PRE_START and mins < RTH_OPEN)
+dayChanged = dayofmonth(time, NY) != dayofmonth(time[1], NY)
+// Futures roll to a new session at the first bar at/after 6:00 PM ET. On an RTH-only
+// futures chart (no overnight bars) the session changes with the calendar date.
+newDay = bar_index == 0 or (isFut ? ((mins >= 1080 and prevMins < 1080) or (dayChanged and prevMins >= RTH_OPEN and prevMins < 1080 and mins < 1080)) : dayChanged)
+
+var array<float> rH  = array.new<float>()
+var array<float> rL  = array.new<float>()
+var array<float> rC  = array.new<float>()
+var array<float> rV  = array.new<float>()
+var array<int>   rBI = array.new<int>()
+var float pmH = na
+var float pmL = na
+var float orH = na
+var float orL = na
+var int   pmStart = na
+
+if newDay
+    array.clear(rH)
+    array.clear(rL)
+    array.clear(rC)
+    array.clear(rV)
+    array.clear(rBI)
+    pmH := na
+    pmL := na
+    orH := na
+    orL := na
+    pmStart := na
+
+if isPre
+    pmH := na(pmH) ? high : math.max(pmH, high)
+    pmL := na(pmL) ? low : math.min(pmL, low)
+    pmStart := na(pmStart) ? bar_index : pmStart
+
+// Only completed bars are used for detection (the forming bar is ignored)
+if isRth and barstate.isconfirmed
+    array.push(rH, high)
+    array.push(rL, low)
+    array.push(rC, close)
+    array.push(rV, nz(volume))
+    array.push(rBI, bar_index)
+    if mins < OR_END
+        orH := na(orH) ? high : math.max(orH, high)
+        orL := na(orL) ? low : math.min(orL, low)
+
+// Prior regular-session high/low and higher-timeframe bias (no repainting)
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[dClose, dSma, dSmaPrev] = request.security(syminfo.tickerid, "D", [close[1], ta.sma(close, 20)[1], ta.sma(close, 20)[6]], lookahead = barmerge.lookahead_on)
+bias = dClose > dSma and dSma > dSmaPrev ? "Bullish" : dClose < dSma and dSma < dSmaPrev ? "Bearish" : "Neutral"
+
+// ---------------------------------------------------------------- helpers
+negate(array<float> a) =>
+    array<float> out = array.new<float>()
+    for x in a
+        array.push(out, -x)
+    out
+
+// Long-side detector. Shorts reuse it on negated prices.
+detect(array<float> H, array<float> L, array<float> C, array<float> V,
+     float q1, float q2, float q3, string n1, string n2, string n3,
+     float e1, float e2, float e3) =>
+    Setup r = Setup.new()
+    int n = array.size(L)
+    if n >= 6
+        // 1. Sweep: lowest low of the session
+        int s = 0
+        for i = 1 to n - 1
+            if array.get(L, i) < array.get(L, s)
+                s := i
+        float lo = array.get(L, s)
+        string sw = ""
+        if not na(q1) and lo < q1
+            sw := n1
+        if not na(q2) and lo < q2
+            sw := sw == "" ? n2 : sw + "/" + n2
+        if not na(q3) and lo < q3
+            sw := sw == "" ? n3 : sw + "/" + n3
+        // 2. MSS level: most recent swing high (2 bars each side) before the sweep
+        float mss = na
+        int p = 2
+        while p < s and p + 2 < n
+            float hp = array.get(H, p)
+            bool isPiv = true
+            for k = p - 2 to p + 2
+                if k != p and array.get(H, k) >= hp
+                    isPiv := false
+            if isPiv
+                mss := hp
+            p += 1
+        if na(mss) and s >= 2
+            mss := array.max(array.slice(H, 0, s))
+        int m = -1
+        if not na(mss)
+            int j = s + 1
+            while j < n and m < 0
+                if array.get(C, j) > mss
+                    m := j
+                j += 1
+        // 3. Displacement FVG with the middle candle inside the sweep-to-MSS leg
+        int fi = -1
+        float bestSize = 0.0
+        if m >= 0
+            int i = math.max(s + 1, 1)
+            while i < math.min(m + 1, n - 1)
+                if i - 1 >= s
+                    float a = array.get(H, i - 1)
+                    float b = array.get(L, i + 1)
+                    if a < b and (fi < 0 or b - a > bestSize)
+                        fi := i
+                        bestSize := b - a
+                i += 1
+        if fi >= 0
+            float fA = array.get(H, fi - 1)
+            float fB = array.get(L, fi + 1)
+            float sh = array.max(array.slice(H, s, n))
+            float rng = sh - lo
+            if rng > 0
+                float oA = sh - 0.62 * rng
+                float oM = sh - 0.705 * rng
+                float oB = sh - 0.79 * rng
+                float ovLo = math.max(fA, oB)
+                float ovHi = math.min(fB, oA)
+                bool ov = ovLo <= ovHi
+                float entry = ov ? (ovLo + ovHi) / 2 : (fA + fB) / 2
+                int startIdx = math.max(0, n - 20)
+                float atr = 0.0
+                for k = startIdx to n - 1
+                    atr += array.get(H, k) - array.get(L, k)
+                atr := atr / (n - startIdx)
+                float stop = lo - 0.1 * atr
+                float risk = entry - stop
+                if risk > 0
+                    float t2 = na
+                    if not na(e1) and e1 > sh
+                        t2 := e1
+                    if not na(e2) and e2 > sh and (na(t2) or e2 < t2)
+                        t2 := e2
+                    if not na(e3) and e3 > sh and (na(t2) or e3 < t2)
+                        t2 := e3
+                    if na(t2)
+                        t2 := math.max(entry + 2 * risk, sh + 0.5 * risk)
+                    // Lifecycle after the FVG completes
+                    int touched = -1
+                    bool invalid = false
+                    int j2 = fi + 2
+                    while j2 < n
+                        if touched < 0 and array.get(L, j2) <= entry
+                            touched := j2
+                        if array.get(C, j2) < fA or array.get(L, j2) <= stop
+                            invalid := true
+                        j2 += 1
+                    bool hit = false
+                    if touched >= 0
+                        int j3 = touched
+                        while j3 < n
+                            if array.get(H, j3) >= sh
+                                hit := true
+                            j3 += 1
+                    float vSum = 0.0
+                    int vCnt = 0
+                    int k2 = 0
+                    while k2 < fi
+                        float vv = array.get(V, k2)
+                        if vv > 0
+                            vSum += vv
+                            vCnt += 1
+                        k2 += 1
+                    r.ok      := true
+                    r.s       := s
+                    r.m       := m
+                    r.fi      := fi
+                    r.extreme := lo
+                    r.swing   := sh
+                    r.mss     := mss
+                    r.fvgA    := fA
+                    r.fvgB    := fB
+                    r.ce      := (fA + fB) / 2
+                    r.eq      := lo + 0.5 * rng
+                    r.oteA    := oA
+                    r.oteMid  := oM
+                    r.oteB    := oB
+                    r.overlap := ov
+                    r.entry   := entry
+                    r.stop    := stop
+                    r.t1      := sh
+                    r.t2      := t2
+                    r.rr1     := (sh - entry) / risk
+                    r.rr2     := (t2 - entry) / risk
+                    r.status  := invalid ? "Invalidated" : hit ? "Target hit" : touched >= 0 ? "Entry reached" : "Pending"
+                    r.rvol    := vCnt > 0 and vSum > 0 ? array.get(V, fi) / (vSum / vCnt) : 1.0
+                    r.swept   := sw
+    r
+
+flipPrices(Setup x) =>
+    x.extreme := -x.extreme
+    x.swing   := -x.swing
+    x.mss     := -x.mss
+    x.fvgA    := -x.fvgA
+    x.fvgB    := -x.fvgB
+    x.ce      := -x.ce
+    x.eq      := -x.eq
+    x.oteA    := -x.oteA
+    x.oteMid  := -x.oteMid
+    x.oteB    := -x.oteB
+    x.entry   := -x.entry
+    x.stop    := -x.stop
+    x.t1      := -x.t1
+    x.t2      := -x.t2
+    x
+
+// Live price updates the status (same rule as the dashboard)
+applyLive(Setup x, bool isLong, float price) =>
+    if x.ok
+        if isLong ? price <= x.stop : price >= x.stop
+            x.status := "Invalidated"
+        else if x.status == "Pending" and (isLong ? price <= x.entry : price >= x.entry)
+            x.status := "Entry reached"
+    x
+
+scoreOf(Setup x, bool isLong, float price, string bs, int nowMin) =>
+    int pts = 15                                   // MSS confirmed
+    string pd = isLong ? "PDL" : "PDH"
+    if str.contains(x.swept, pd)
+        pts += 20
+    else if x.swept != ""
+        pts += 15
+    if isLong ? x.ce < x.eq : x.ce > x.eq
+        pts += 10
+    if x.overlap
+        pts += 15
+    if x.rr1 >= 2
+        pts += 10
+    else if x.rr1 >= 1.5
+        pts += 5
+    if (bs == "Bullish" and isLong) or (bs == "Bearish" and not isLong)
+        pts += 10
+    else if bs == "Neutral"
+        pts += 4
+    if x.rvol >= 1.5
+        pts += 5
+    if nowMin >= OR_END and nowMin <= WINDOW_END
+        pts += 5
+    float far  = isLong ? x.swing - x.entry : x.entry - x.swing
+    float dist = isLong ? price - x.entry : x.entry - price
+    float prox = dist <= 0 ? 1.0 : far > 0 ? math.max(0.0, 1 - dist / far) : 0.0
+    pts += int(math.round(10 * prox))
+    math.min(pts, 100)
+
+qualifies(Setup x) =>
+    x.ok and x.overlap and x.rr1 >= minRR1 and x.rr2 >= minRR2 and x.status != "Invalidated" and x.status != "Target hit"
+
+filterReason(Setup x) =>
+    string t = ""
+    if not x.overlap
+        t := "FVG does not overlap OTE"
+    if x.rr1 < minRR1
+        t := t == "" ? "T1 under " + str.tostring(minRR1) + "R" : t + "; T1 under " + str.tostring(minRR1) + "R"
+    if x.rr2 < minRR2
+        t := t == "" ? "T2 under " + str.tostring(minRR2) + "R" : t + "; T2 under " + str.tostring(minRR2) + "R"
+    if x.status == "Invalidated" or x.status == "Target hit"
+        t := t == "" ? x.status : t + "; " + x.status
+    t
+
+fmt(float v) => na(v) ? "—" : str.tostring(v, format.mintick)
+
+// ---------------------------------------------------------------- drawing registry
+var array<line>  gLines  = array.new<line>()
+var array<box>   gBoxes  = array.new<box>()
+var array<label> gLabels = array.new<label>()
+var table tb = table.new(position.top_right, 2, 16, bgcolor = color.new(color.black, 15), border_width = 1)
+
+level(float y, int x1, string txt, color col, string st, int w) =>
+    line ln = na
+    label lb = na
+    if not na(y)
+        ln := line.new(x1, y, bar_index + extendBars, y, color = col, style = st, width = w)
+        lb := label.new(bar_index + extendBars, y, txt + " " + fmt(y), style = label.style_label_left,
+             color = color.new(color.black, 100), textcolor = col, size = size.small)
+    [ln, lb]
+
+// ---------------------------------------------------------------- main
+if barstate.islast
+    for l in gLines
+        line.delete(l)
+    for b in gBoxes
+        box.delete(b)
+    for lb in gLabels
+        label.delete(lb)
+    array.clear(gLines)
+    array.clear(gBoxes)
+    array.clear(gLabels)
+    table.clear(tb, 0, 0, 1, 15)
+
+    int n = array.size(rL)
+    int x0 = n > 0 ? array.get(rBI, 0) : bar_index
+
+    if showLevels and timeframe.isintraday
+        [l1, b1] = level(pdh, x0, "PDH", cPd, line.style_solid, 1)
+        [l2, b2] = level(pdl, x0, "PDL", cPd, line.style_solid, 1)
+        int xp = na(pmStart) ? x0 : pmStart
+        [l3, b3] = level(pmH, xp, "PMH", cPm, line.style_dashed, 1)
+        [l4, b4] = level(pmL, xp, "PML", cPm, line.style_dashed, 1)
+        [l5, b5] = level(orH, x0, "ORH", cOr, line.style_solid, 1)
+        [l6, b6] = level(orL, x0, "ORL", cOr, line.style_solid, 1)
+        for ln in array.from(l1, l2, l3, l4, l5, l6)
+            if not na(ln)
+                array.push(gLines, ln)
+        for lb in array.from(b1, b2, b3, b4, b5, b6)
+            if not na(lb)
+                array.push(gLabels, lb)
+
+    Setup lng = detect(rH, rL, rC, rV, pdl, pmL, orL, "PDL", "PML", "ORL", orH, pmH, pdh)
+    lng := applyLive(lng, true, close)
+    Setup sht = detect(negate(rL), negate(rH), negate(rC), rV, -pdh, -pmH, -orH, "PDH", "PMH", "ORH", -orL, -pmL, -pdl)
+    if sht.ok
+        sht := flipPrices(sht)
+    sht := applyLive(sht, false, close)
+
+    int scL = lng.ok ? scoreOf(lng, true, close, bias, mins) : -1
+    int scS = sht.ok ? scoreOf(sht, false, close, bias, mins) : -1
+    bool okL = lng.ok and (showFailed or qualifies(lng)) and sideMode != "Short only"
+    bool okS = sht.ok and (showFailed or qualifies(sht)) and sideMode != "Long only"
+
+    Setup sel = na
+    bool isLong = true
+    int sc = -1
+    if okL and (not okS or scL >= scS)
+        sel := lng
+        isLong := true
+        sc := scL
+    else if okS
+        sel := sht
+        isLong := false
+        sc := scS
+
+    if not na(sel)
+        int xs  = array.get(rBI, sel.s)
+        int xm  = array.get(rBI, sel.m)
+        int xf  = array.get(rBI, sel.fi - 1)
+        int xr  = bar_index + extendBars
+        float fLo = math.min(sel.fvgA, sel.fvgB)
+        float fHi = math.max(sel.fvgA, sel.fvgB)
+        float oLo = math.min(sel.oteA, sel.oteB)
+        float oHi = math.max(sel.oteA, sel.oteB)
+        array.push(gBoxes, box.new(xs, oHi, xr, oLo, border_color = color.new(cOte, 70),
+             bgcolor = color.new(cOte, 85), text = "OTE 62–79%", text_color = cOte, text_size = size.tiny,
+             text_halign = text.align_left, text_valign = text.align_top))
+        array.push(gBoxes, box.new(xf, fHi, xr, fLo, border_color = color.new(cEntry, 60),
+             bgcolor = color.new(cEntry, 82), text = "FVG", text_color = cEntry, text_size = size.tiny,
+             text_halign = text.align_left, text_valign = text.align_bottom))
+        [a1, c1] = level(sel.entry, xf, "Entry", cEntry, line.style_solid, 2)
+        [a2, c2] = level(sel.stop, xs, "Stop", cStop, line.style_dashed, 1)
+        [a3, c3] = level(sel.t1, xs, "T1", cTgt, line.style_dashed, 1)
+        [a4, c4] = level(sel.t2, xs, "T2", cTgt, line.style_dashed, 1)
+        [a5, c5] = level(sel.eq, xs, "EQ 50%", cEq, line.style_dotted, 1)
+        [a6, c6] = level(sel.oteMid, xs, "OTE 70.5", cOte, line.style_dotted, 1)
+        [a7, c7] = level(sel.ce, xf, "FVG CE", cEntry, line.style_dotted, 1)
+        for ln in array.from(a1, a2, a3, a4, a5, a6, a7)
+            if not na(ln)
+                array.push(gLines, ln)
+        for lb in array.from(c1, c2, c3, c4, c5, c6, c7)
+            if not na(lb)
+                array.push(gLabels, lb)
+        // MSS level and sweep marker
+        array.push(gLines, line.new(xs, sel.mss, xm, sel.mss, color = color.gray, style = line.style_dotted, width = 1))
+        array.push(gLabels, label.new(xm, sel.mss, "MSS", style = isLong ? label.style_label_down : label.style_label_up,
+             color = color.new(color.gray, 20), textcolor = color.white, size = size.tiny))
+        array.push(gLabels, label.new(xs, sel.extreme, "Sweep" + (sel.swept != "" ? " " + sel.swept : ""),
+             style = isLong ? label.style_label_up : label.style_label_down,
+             color = color.new(isLong ? cTgt : cStop, 10), textcolor = color.white, size = size.tiny))
+
+        // Alert when price trades into the entry
+        if barstate.isrealtime and sel.status == "Entry reached"
+            alert(syminfo.ticker + " " + (isLong ? "LONG" : "SHORT") + " FVG entry reached at " + fmt(sel.entry) +
+                 " | stop " + fmt(sel.stop) + " | T1 " + fmt(sel.t1) + " | T2 " + fmt(sel.t2), alert.freq_once_per_bar)
+
+    if showTable
+        color tc = color.white
+        table.cell(tb, 0, 0, syminfo.ticker, text_color = tc, text_size = size.small)
+        if na(sel)
+            table.cell(tb, 1, 0, "No setup meets the plan", text_color = tc, text_size = size.small)
+            string why = ""
+            if lng.ok
+                why := "Long: " + filterReason(lng)
+            if sht.ok
+                why := why == "" ? "Short: " + filterReason(sht) : why + "\nShort: " + filterReason(sht)
+            table.cell(tb, 0, 1, "Detail", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 1, why == "" ? "No sweep, MSS and FVG sequence yet" : why, text_color = tc, text_size = size.small)
+            if mins < OR_END and isRth
+                table.cell(tb, 0, 2, "Note", text_color = tc, text_size = size.small)
+                table.cell(tb, 1, 2, "Opening range forming. Observe only.", text_color = cOte, text_size = size.small)
+        else
+            float riskPs = math.abs(sel.entry - sel.stop)
+            string reason = filterReason(sel)
+            table.cell(tb, 1, 0, (isLong ? "LONG" : "SHORT") + " · " + sel.status, text_color = isLong ? cTgt : cStop, text_size = size.small)
+            table.cell(tb, 0, 1, "Setup Score", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 1, str.tostring(sc) + " / 100", text_color = tc, text_size = size.small)
+            table.cell(tb, 0, 2, "Ideal entry", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 2, fmt(sel.entry), text_color = cEntry, text_size = size.small)
+            table.cell(tb, 0, 3, "Stop", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 3, fmt(sel.stop), text_color = cStop, text_size = size.small)
+            table.cell(tb, 0, 4, "Target 1 / 2", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 4, fmt(sel.t1) + " / " + fmt(sel.t2), text_color = cTgt, text_size = size.small)
+            table.cell(tb, 0, 5, "R:R (T1 / T2)", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 5, str.tostring(sel.rr1, "#.0") + " / " + str.tostring(sel.rr2, "#.0"), text_color = tc, text_size = size.small)
+            table.cell(tb, 0, 6, "Risk per share", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 6, fmt(riskPs), text_color = tc, text_size = size.small)
+            table.cell(tb, 0, 7, "Swept", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 7, sel.swept == "" ? "None" : sel.swept, text_color = tc, text_size = size.small)
+            table.cell(tb, 0, 8, "FVG overlaps OTE", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 8, sel.overlap ? "Yes" : "No", text_color = tc, text_size = size.small)
+            table.cell(tb, 0, 9, "HTF bias", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 9, bias, text_color = tc, text_size = size.small)
+            table.cell(tb, 0, 10, "Displacement vol", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 10, str.tostring(sel.rvol, "#.0") + "x", text_color = tc, text_size = size.small)
+            table.cell(tb, 0, 11, "Plan filters", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 11, reason == "" ? "Pass" : reason, text_color = reason == "" ? cTgt : cOte, text_size = size.small)
+        if not timeframe.isintraday
+            table.cell(tb, 0, 12, "Note", text_color = tc, text_size = size.small)
+            table.cell(tb, 1, 12, "Use a 5-minute chart.", text_color = cOte, text_size = size.small)
