@@ -263,4 +263,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        # Show the error on the run's summary page (GitHub annotation), not only in the log
+        last = tb.strip().splitlines()
+        msg = "%0A".join(last[-12:]).replace("::", ": :")
+        print(f"::error title=FVG scanner error::{msg}")
+        sys.exit(1)

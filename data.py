@@ -98,7 +98,7 @@ def yahoo_daily(tickers: list[str], period="1y") -> dict[str, pd.DataFrame]:
 
 # ----------------------------------------------------------------- Alpaca (6+ months of 5-minute bars)
 def alpaca_enabled() -> bool:
-    return bool(os.environ.get("ALPACA_KEY_ID") and os.environ.get("ALPACA_SECRET_KEY"))
+    return bool(os.environ.get("ALPACA_KEY_ID", "").strip() and os.environ.get("ALPACA_SECRET_KEY", "").strip())
 
 
 def alpaca_5m(ticker: str, start: dt.date, end: dt.date) -> list:
@@ -107,7 +107,8 @@ def alpaca_5m(ticker: str, start: dt.date, end: dt.date) -> list:
     cache = CACHE / f"alpaca_{ticker}_{start}_{end}.pkl.gz"
     if cache.exists():
         return pickle.loads(gzip.decompress(cache.read_bytes()))
-    hdr = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY_ID"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET_KEY"]}
+    # .strip(): a key pasted into GitHub secrets with a trailing Enter breaks the request header
+    hdr = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY_ID"].strip(), "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET_KEY"].strip()}
     params = {"timeframe": "5Min", "start": f"{start}T00:00:00Z", "end": f"{end}T23:59:00Z", "limit": 10000,
               "adjustment": "split", "feed": C.ALPACA_FEED, "sort": "asc"}
     rows, token = [], None
