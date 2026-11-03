@@ -28,7 +28,7 @@ import data as D
 import engine as E
 import learn as L
 import report
-from replay import COLUMNS, evaluate, prepare, replay_ticker, snapshot
+from replay import COLUMNS, entry_price, evaluate, prepare, replay_ticker, snapshot
 
 NY = ZoneInfo("America/New_York")
 ROOT = Path(__file__).resolve().parent
@@ -96,6 +96,9 @@ def live_scan() -> None:
         for s in E.find_setups(closed, lv):
             prepare(s, t, today, bars[-1].c, bias.get(t, "Neutral"), now.hour * 60 + now.minute, cfg)
             s["levels"], s["asset"], s["mult"] = lv, E.asset_type(t), E.mult_of(t)
+            row = {"side": s["side"], "fvg_hi": s["fvg_hi"], "fvg_lo": s["fvg_lo"], "entry": s["entry"], "ce": s["ce"], "ote_62": s["ote_a"]}
+            s["ladder"] = [{"kind": k, "price": round(entry_price(row, k), 4), "weight": w}
+                           for k, w in C.TESTS["ladders"][C.DASHBOARD_LADDER]]
             charts[s["key"]] = [[round(b.o, 4), round(b.h, 4), round(b.l, 4), round(b.c, 4), b.min] for b in closed]
             detected.append(s)
     active = [s for s in detected if s["status"] not in ("Invalidated", "Target hit")]
@@ -109,12 +112,13 @@ def live_scan() -> None:
     keep = ["key", "ticker", "side", "status", "score", "notes", "price", "entry", "stop", "t1", "t2", "rr1", "rr2",
             "fvg_lo", "fvg_hi", "ce", "eq", "ote_a", "ote_mid", "ote_b", "ote_lo", "ote_hi", "extreme", "swing", "mss",
             "proximity", "dist_pct", "bias", "overlap", "swept", "rvol", "levels", "session", "sweep_idx", "fvg_idx",
-            "asset", "mult", "pts", "filter_reasons"]
+            "asset", "mult", "pts", "filter_reasons", "ladder"]
     state = {"updated": now.strftime("%a %b %d, %Y %I:%M %p ET"), "updated_iso": now.isoformat(),
              "scanned": len(bars_by), "total": len(ranked), "filtered": len(active) - len(ranked),
              "top": [{**{k: s.get(k) for k in keep}, "bars": charts[s["key"]]} for s in top],
              "prices": {t: round(p, 4) for t, p in prices.items()}, "universe": u["rows"],
-             "mults": {t: E.mult_of(t) for t in prices}, "config_version": cfg["version"]}
+             "mults": {t: E.mult_of(t) for t in prices}, "config_version": cfg["version"],
+             "sizing": {**C.SIZING, "ladder": C.DASHBOARD_LADDER}}
     out = ROOT / "site" / "data"
     out.mkdir(parents=True, exist_ok=True)
     (out / "state.json").write_text(json.dumps(state, default=float))

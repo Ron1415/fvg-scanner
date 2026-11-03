@@ -6,7 +6,7 @@
 <div class="sub" id="sub">Loading the latest scan…</div>
 <div class="toplinks"><a href="review.html">Review and backtest</a><a href="#" id="runNow">Run a scan now</a><a href="universe.html">Universe</a></div>
 <div class="settings">Account size $<input id="acct" type="number" min="0" step="100" style="width:120px">
-<span class="hint">Used to suggest size at __RISK__% risk per trade (contracts for futures).</span></div>
+<span class="hint" id="sizeHint"></span></div>
 <div id="tokenPanel"></div>
 <div id="banner" class="banner"></div>
 <nav><button data-tab="setups" class="on">Top setups</button><button data-tab="open">Open trades</button>
@@ -37,6 +37,23 @@ const f2 = v => v == null || v === "" || isNaN(v) ? "—" : Number(v).toLocaleSt
 const fr = v => v == null || isNaN(v) ? "—" : `<span class="${v > 0 ? "pos" : v < 0 ? "neg" : ""}">${v > 0 ? "+" : ""}${Number(v).toFixed(2)}R</span>`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const acct = () => Number(Store.ls.get("acct") || 0);
+const SIZING = __SIZING__;
+/* Units (shares or contracts) for a plan of legs [{price, weight}] with one stop:
+   the smaller of (account x RISK%) / risk and (account x MAXPOS%) / position value. */
+function sizePlan(legs, stop, mult, side) {
+  const a = acct(); if (!a) return null;
+  const RISK = SIZING[side].risk_pct, MAXPOS = SIZING[side].max_position_pct;
+  const riskPerUnit = legs.reduce((s, l) => s + l.weight * Math.abs(l.price - stop), 0) * mult;
+  const valuePerUnit = legs.reduce((s, l) => s + l.weight * l.price, 0) * mult;
+  if (!(riskPerUnit > 0)) return null;
+  const byRisk = a * RISK / 100 / riskPerUnit, byCap = a * MAXPOS / 100 / valuePerUnit;
+  const n = Math.floor(Math.min(byRisk, byCap));
+  const split = legs.map(l => Math.floor(n * l.weight));
+  split[split.length - 1] += n - split.reduce((x, y) => x + y, 0);   // remainder to the deepest leg
+  return {total: n, capped: byCap < byRisk, legs: split,
+          risk$: n * riskPerUnit, value$: n * valuePerUnit};
+}
+const KIND = {fvg_edge: "Gap edge", blend: "Blend", ote_mid: "OTE (current)", fvg_ce: "Gap middle", ote_62: "OTE 62%"};
 const rOf = (t, px) => { const risk = Math.abs(t.entry_price - t.stop); if (!risk || px == null) return null;
   return (t.side === "LONG" ? px - t.entry_price : t.entry_price - px) / risk; };
 
@@ -90,14 +107,28 @@ function card(s, i) {
   <div class="k stop"><span>Stop</span><b>${f2(s.stop)}</b></div><div class="k tgt"><span>Target 1</span><b>${f2(s.t1)}</b></div>
   <div class="k tgt"><span>Target 2</span><b>${f2(s.t2)}</b></div><div class="k"><span>R:R (T1 / T2)</span><b>${s.rr1.toFixed(1)} / ${s.rr2.toFixed(1)}</b></div>
   <div class="k"><span>Risk per ${s.mult > 1 ? "contract" : "share"}</span><b>${f2(Math.abs(s.entry - s.stop) * (s.mult || 1))}</b></div></div>
+  ${ladderHtml(s)}
   ${chart(s)}<div class="notes">${s.notes.map(n => `<span class="tag">${esc(n)}</span>`).join("")}</div>
   <div class="actions"><button class="btn take ${s.side}" data-take="${esc(s.key)}">Take ${s.side.toLowerCase()} trade</button>
   ${taken ? '<span class="taken">You have an open trade on this setup</span>' : ""}</div>
   <details><summary>All levels</summary><table>${rows}</table></details></div>`;
 }
 
+function ladderHtml(s) {
+  if (!s.ladder || !s.ladder.length) return "";
+  const plan = sizePlan(s.ladder, s.stop, s.mult || 1, s.side), unit = (s.mult || 1) > 1 ? "contracts" : "shares";
+  const MAXPOS = SIZING[s.side].max_position_pct;
+  const rows = s.ladder.map((l, i) => `<tr><td>${KIND[l.kind] || l.kind}</td><td>${f2(l.price)}</td><td>${Math.round(l.weight * 100)}%</td>
+    <td>${plan ? plan.legs[i] + " " + unit : "—"}</td></tr>`).join("");
+  return `<div class="tbl"><table><tr><th>Scaled entry (test plan)</th><th>Limit price</th><th>Share of position</th><th>Size</th></tr>${rows}</table>
+    <div class="hint">${plan ? `Total ${plan.total} ${unit}: about $${f2(plan.value$)} of the account (cap ${MAXPOS}%), $${f2(plan.risk$)} at risk if every leg fills${plan.capped ? "; limited by the " + MAXPOS + "% position cap" : ""}.` : "Enter your account size above to see the size of each leg."}
+    One stop for every leg. Each leg you fill is recorded as its own trade.</div></div>`;
+}
+
 function render() {
   if (!S) return;
+  $("#sizeHint").textContent = `Size suggestion: longs risk up to ${SIZING.LONG.risk_pct}% of the account (position capped at ${SIZING.LONG.max_position_pct}%); ` +
+    `shorts risk up to ${SIZING.SHORT.risk_pct}% (capped at ${SIZING.SHORT.max_position_pct}%), full exit at T1, breakeven at +0.5R, 60-minute time stop.`;
   $("#sub").textContent = `Updated ${S.updated} · ${S.scanned} symbols · ${S.total} setups meet the plan · top ${S.top.length} shown · config v${S.config_version}`;
   const ageMin = (Date.now() - new Date(S.updated_iso).getTime()) / 60000;
   $("#banner").className = "banner" + (ageMin > 40 ? " warn" : "");
@@ -147,7 +178,8 @@ async function openDialog(kind, obj) {
   const last = S.prices[tk] ?? obj.price;
   $("#fPrice").value = last != null ? Number(last).toFixed(2) : ""; $("#pxHint").textContent = "(fetching live price…)";
   if (kind === "open") { const risk = Math.abs(obj.entry - obj.stop);
-    $("#fShares").value = acct() && risk > 0 ? Math.floor(acct() * __RISK__ / 100 / (risk * mult)) : "";
+    const plan = sizePlan([{price: obj.entry, weight: 1}], obj.stop, mult, obj.side);
+    $("#fShares").value = plan ? plan.total : "";
     $("#sharesLbl").textContent = mult > 1 ? `Contracts ($${mult.toLocaleString()} per point)` : "Shares"; }
   $("#dlg").showModal();
   const q = await Store.quote(tk);

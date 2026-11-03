@@ -255,6 +255,21 @@ def qualify(s: dict, cfg: dict) -> list[str]:
         r.append(f"T2 under {f['min_rr_t2']}R")
     if s.get("score", 0) < f["min_score"]:
         r.append(f"Score under {f['min_score']}")
+    s["base_qualified"] = not r
+    s["guards"] = {}
+    sr = C.SHORT_RULES
+    if s["side"] == "SHORT" and sr["enabled"]:
+        risk_pct = abs(s["entry"] - s["stop"]) / s["entry"] * 100 if s["entry"] else 0
+        g = {"bias": s.get("bias") == "Bearish" or not sr["require_bearish_bias"],
+             "sweep": "PDH" in s["swept"] or len(s["swept"]) >= 2 or not sr["require_strong_sweep"],
+             "rr": s["rr2"] >= sr["min_rr_t2"], "risk": risk_pct >= sr["min_risk_pct"],
+             "time": s.get("snap_min", 0) >= sr["not_before"] or s.get("session_name", "NY") != "NY",
+             "etf": not (sr["no_leveraged_etfs"] and s.get("ticker") in C.LEVERAGED_ETFS)}
+        s["guards"] = g
+        names = {"bias": "short needs a bearish daily trend", "sweep": "short needs a PDH or 2+ level sweep",
+                 "rr": f"short T2 under {sr['min_rr_t2']}R", "risk": f"short risk under {sr['min_risk_pct']}% of price",
+                 "time": "short before 10:30", "etf": "no shorts on leveraged ETFs"}
+        r += [names[k] for k, ok in g.items() if not ok]
     s["filter_reasons"], s["qualified"] = r, not r
     return r
 

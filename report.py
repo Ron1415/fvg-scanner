@@ -26,7 +26,7 @@ def write_pages() -> None:
     for name in ("style.css", "store.js"):
         shutil.copy(TPL / name, site / name)
     for src, dst in (("dashboard_template.html", "index.html"), ("review_template.html", "review.html")):
-        text = (TPL / src).read_text().replace("__CFG__", _cfg()).replace("__RISK__", str(C.RISK_PCT))
+        text = (TPL / src).read_text().replace("__CFG__", _cfg()).replace("__RISK__", str(C.RISK_PCT)).replace("__MAXPOS__", str(C.MAX_POSITION_PCT)).replace("__SIZING__", json.dumps(C.SIZING))
         (site / dst).write_text(text)
     for src, dst in (("trades.json", "trades.json"), ("config_changes.json", "config_changes.json"),
                      ("backtest/meta.json", "backtest_meta.json")):

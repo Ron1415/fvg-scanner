@@ -18,7 +18,7 @@ import pandas as pd
 
 import config as C
 import engine as E
-from replay import COLUMNS, VARIANTS
+from replay import COLUMNS, LADDERS, VARIANTS
 
 NY = ZoneInfo("America/New_York")
 ROOT = Path(__file__).resolve().parent
@@ -107,6 +107,9 @@ def prep(df: pd.DataFrame) -> pd.DataFrame:
     df["in_win"] = df["snap_min"] <= C.SIM["entry_cutoff"]
     df["plan_win"] = df["snap_min"] <= C.SIM["plan_window_end"]
     df["sys"] = df["source"].isin(SYSTEMATIC)
+    if "session_name" not in df:
+        df["session_name"] = "NY"
+    df["session_name"] = df["session_name"].fillna("NY")
     # a session replayed both daily and by a later backtest is counted once (backtest copy kept)
     bt_keys = set(df.loc[df["source"] == "Backtest", "key"])
     df = df[~((df["source"] == "Replay") & df["key"].isin(bt_keys))]
@@ -154,25 +157,54 @@ def review(kind="Manual", changes=None) -> dict:
             mrow("Backtest", metrics(q[q["source"] == "Backtest"])),
             mrow("Systematic (replays + backtest)", metrics(sysq)),
             mrow("Systematic, before cost (gross)", metrics(sysq, "r_plan")),
-            mrow(f"Systematic, plan window only (formed by {E.hm(C.SIM['plan_window_end'])})", metrics(sysq[sysq["plan_win"]])),
+            mrow(f"Systematic, plan window only (New York, formed by {E.hm(C.SIM['plan_window_end'])})", metrics(sysq[sysq["plan_win"] & (sysq["session_name"] == "NY")])),
             mrow("Live top-5 suggestions only", metrics(q[(q["source"] == "Live") & q["suggested"]]))]
     trades = load_trades()
     tr = [t["r"] for t in trades if t.get("r") is not None]
     rows.append(["Your actual trades", len(tr), len(tr), "", _f(float(np.mean([x > 0 for x in tr])) if tr else None, True),
                  _f(float(np.mean(tr)) if tr else None), "", "", _f(float(sum(tr))), "", "", ""])
+    ny = sysq[sysq["session_name"] == "NY"]
+    fut = sysq[sysq["asset_type"] == "Future"]
+    rows += [mrow("Stocks and ETFs, New York session only", metrics(ny[ny["asset_type"] != "Future"])),
+             mrow("Futures, New York session", metrics(fut[fut["session_name"] == "NY"])),
+             mrow("Futures, all 24-hour sessions", metrics(fut))]
     table("1. Strategy performance (qualified setups; results net of costs)", HEAD, rows,
           f"Costs: {C.SIM['cost_pct_per_side']}% of price per side. Entries allowed until {E.hm(C.SIM['entry_cutoff'])} ET.")
 
-    rows = [mrow(a, metrics(sysq[sysq["asset_type"] == a])) for a in ("ETF", "Stock", "Future")]
-    rows.append(mrow("Leveraged/inverse ETFs", metrics(sysq[sysq["ticker"].isin(C.LEVERAGED_ETFS)])))
-    rows += [mrow(s_, metrics(sysq[sysq["side"] == s_])) for s_ in ("LONG", "SHORT")]
+    rows = [mrow(f"Futures, {n} session" + (" (6 PM-midnight ET)" if n == "Asia" else " (2-8 AM ET)" if n == "London" else " (9:30-4:00 ET)"),
+                 metrics(fut[fut["session_name"] == n])) for n in ("Asia", "London", "NY")]
+    for t in sorted(fut["ticker"].unique()):
+        for n in ("Asia", "London", "NY"):
+            rows.append(mrow(f"{t} {n}", metrics(fut[(fut["ticker"] == t) & (fut["session_name"] == n)])))
+    table("1c. Futures by session (24-hour test; qualified, net of costs)", HEAD, rows,
+          "Asia and London use their own levels: prior-day high/low, the previous session's high/low, and the session's first 30 minutes.")
+
+    rows = [mrow(a, metrics(ny[ny["asset_type"] == a])) for a in ("ETF", "Stock", "Future")]
+    rows.append(mrow("Leveraged/inverse ETFs", metrics(ny[ny["ticker"].isin(C.LEVERAGED_ETFS)])))
+    rows += [mrow(s_, metrics(ny[ny["side"] == s_])) for s_ in ("LONG", "SHORT")]
     for lo, hi in [(600, 630), (630, 690), (690, 780), (780, 870), (870, 960)]:
-        rows.append(mrow(f"Formed {E.hm(lo)}-{E.hm(hi)}", metrics(sysq[(sysq["snap_min"] >= lo) & (sysq["snap_min"] < hi)])))
+        rows.append(mrow(f"Formed {E.hm(lo)}-{E.hm(hi)}", metrics(ny[(ny["snap_min"] >= lo) & (ny["snap_min"] < hi)])))
     for lo, hi in [(0, .15), (.15, .3), (.3, .6), (.6, 99)]:
         rows.append(mrow(f"Risk {lo}-{hi}% of price" if hi < 99 else f"Risk {lo}%+", metrics(sysq[(sysq["risk_pct"] >= lo) & (sysq["risk_pct"] < hi)])))
-    for t in sorted(sysq[sysq["asset_type"] == "Future"]["ticker"].unique()):
-        rows.append(mrow("Future " + t, metrics(sysq[sysq["ticker"] == t])))
-    table("2. By asset, side, time of day, risk size (systematic, qualified)", HEAD, rows)
+    table("2. New York session: by asset, side, time of day, risk size (systematic, qualified)", HEAD, rows)
+
+    # short guardrails: all shorts that passed the normal filters, with and without each check
+    w_all = df[df["in_win"] & df["sys"]]
+    if "base_qualified" in w_all:
+        bq = as_bool(w_all["base_qualified"]) | (w_all["base_qualified"].isna() & w_all["qualified"])
+        shorts, longs = w_all[bq & (w_all["side"] == "SHORT")], w_all[bq & (w_all["side"] == "LONG")]
+        rows = [mrow("Longs passing the normal filters", metrics(longs)),
+                mrow("Shorts passing the normal filters (before guardrails)", metrics(shorts)),
+                mrow("Shorts passing every guardrail (traded)", metrics(shorts[shorts["qualified"]]))]
+        names = {"g_bias": "bearish daily trend", "g_sweep": "PDH or 2+ level sweep", "g_rr": f"R:R to T2 {C.SHORT_RULES['min_rr_t2']}+",
+                 "g_risk": f"risk {C.SHORT_RULES['min_risk_pct']}%+ of price", "g_time": "formed 10:30 or later", "g_etf": "not a leveraged ETF"}
+        for col, label in names.items():
+            if col in shorts and shorts[col].notna().any():
+                ok = as_bool(shorts[col])
+                rows += [mrow(f"Shorts passing: {label}", metrics(shorts[ok])), mrow(f"Shorts failing: {label}", metrics(shorts[~ok]))]
+        table("2b. Short guardrails (systematic; shorts use full exit at T1, breakeven at +0.5R, 60-minute time stop)", HEAD, rows,
+              f"Sizing: longs {C.SIZING['LONG']['risk_pct']}% risk (cap {C.SIZING['LONG']['max_position_pct']}% of account), "
+              f"shorts {C.SIZING['SHORT']['risk_pct']}% risk (cap {C.SIZING['SHORT']['max_position_pct']}%). Results here are in R, before sizing.")
 
     oc = sysq.groupby("outcome")["r_plan_net"].agg(["count", "mean"]).sort_values("count", ascending=False)
     table("3. Outcomes (systematic, qualified)", ["Outcome", "Count", "Share", "Avg R"],
@@ -200,22 +232,26 @@ def review(kind="Manual", changes=None) -> dict:
     table("6. Filter check (systematic)", HEAD, rows)
 
     # side-by-side tests: entry type x stop buffer, under several filters
-    filt = {"All qualified": sysq, "Plan window (by 11:30)": sysq[sysq["plan_win"]],
-            "Midday 11:30-14:30": sysq[(sysq["snap_min"] >= 690) & (sysq["snap_min"] < 870)],
+    nyq = sysq["session_name"] == "NY"
+    filt = {"All qualified": sysq, "Plan window (by 11:30)": sysq[nyq & sysq["plan_win"]],
+            "Midday 11:30-14:30": sysq[nyq & (sysq["snap_min"] >= 690) & (sysq["snap_min"] < 870)],
             "Stocks only": sysq[sysq["asset_type"] == "Stock"], "R:R to T2 2.5+": sysq[sysq["rr2"] >= 2.5],
             "Risk 0.15%+": sysq[sysq["risk_pct"] >= 0.15]}
-    combo = sysq[(sysq["snap_min"] >= 690) & (sysq["snap_min"] < 870) & (sysq["rr2"] >= 2.5) & (sysq["risk_pct"] >= 0.15)]
+    combo = sysq[nyq & (sysq["snap_min"] >= 690) & (sysq["snap_min"] < 870) & (sysq["rr2"] >= 2.5) & (sysq["risk_pct"] >= 0.15)]
     filt["Midday + R:R 2.5+ + risk 0.15%+"] = combo
     rows = []
-    for e, b in VARIANTS:
-        tc, rc = f"trig_{e}_{b}", f"r_{e}_{b}"
+    tests = [(f"Entry {e}, stop {b} ATR", f"trig_{e}_{b}", f"r_{e}_{b}") for e, b in VARIANTS]
+    tests += [(f"Scaled {n} ({', '.join(f'{k} {w:.0%}' for k, w in legs)})", f"trig_{n}", f"r_{n}") for n, legs in LADDERS.items()]
+    for label, tc, rc in tests:
         for name, d in filt.items():
-            if tc not in d:
+            if tc not in d or d[tc].isna().all():
                 continue
             dd = d.copy(); dd[tc] = as_bool(dd[tc]); dd[rc] = pd.to_numeric(dd[rc], errors="coerce")
-            rows.append(mrow(f"Entry {e}, stop {b} ATR · {name}", metrics(dd, rc, tc)))
+            rows.append(mrow(f"{label} · {name}", metrics(dd, rc, tc)))
     table("7. Improvement tests: entry type x stop buffer x filter (net of costs)", HEAD, rows,
-          "ote_mid = current entry (middle of the FVG/OTE overlap); fvg_edge = first touch of the gap; fvg_ce = gap midpoint.")
+          "ote_mid = current entry (middle of the FVG/OTE overlap); fvg_edge = first touch of the gap; fvg_ce = gap midpoint; "
+          "blend = halfway between the gap edge and ote_mid; ote_62 = first touch of the OTE zone. Scaled rows are in R of the "
+          "full planned position (a partial fill counts only what filled).")
 
     t = sysq[sysq["triggered"]]
     rows = []

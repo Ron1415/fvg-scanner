@@ -81,7 +81,60 @@ def test_detection_and_replay():
     check("replayed loser stops out", rows and rows[0]["outcome"] == "Stop")
 
 
+def test_ladder():
+    from replay import ladder
+    row = {"side": "LONG", "entry": 100.0, "fvg_hi": 101.0, "fvg_lo": 99.5, "ce": 100.25, "ote_62": 100.8,
+           "extreme": 99.0, "atr": 0.0, "t1": 103.0, "t2": 104.0, "snap_min": 620}
+    legs = [("fvg_edge", 0.2), ("blend", 0.3), ("ote_mid", 0.5)]   # limits at 101, 100.5, 100; stop 99
+    # dips to 100.4 (edge and blend fill, the deepest leg does not), then runs through T2
+    b = bars([[101.5, 101.6, 100.4, 100.6], [100.6, 103.1, 100.5, 103], [103, 104.2, 102.9, 104]])
+    trig, r, filled = ladder(row, legs, b)
+    check("scaled entry: partial fill recorded", trig and abs(filled - 0.5) < 1e-9)
+    planned = 0.2 * 2 + 0.3 * 1.5 + 0.5 * 1.0
+    got = (0.2 * (0.5 * 2 + 0.5 * 3) + 0.3 * (0.5 * 2.5 + 0.5 * 3.5)) / planned
+    check("scaled entry: result in R of the full planned risk", abs(r - got) < 0.02)
+
+
+def test_overnight_futures():
+    """A sweep-and-reverse during the London session (2-8 AM ET) is found and simulated."""
+    import config as C
+    from replay import replay_ticker
+    prev = synthetic_day("2026-10-28", "win")
+    day = synthetic_day("2026-10-29", "win")
+    lon = synthetic_day("2026-10-29", "win")   # same shape, moved to 2:00 AM
+    shift = (9 * 60 + 30 - 2 * 60) * 60
+    lon = [b._replace(ts=b.ts - shift, min=b.min - (9 * 60 + 30 - 2 * 60)) for b in lon][:72]
+    rows = replay_ticker("ES=F", prev + sorted(lon + day, key=lambda b: b.ts), [], "Backtest", E.settings(), {"2026-10-29"})
+    names = {r["session_name"] for r in rows}
+    check("futures replay covers New York and London", {"NY", "London"} <= names)
+    lr = [r for r in rows if r["session_name"] == "London" and r["side"] == "LONG"]
+    check("London long setup triggered with London clock times", lr and lr[0]["triggered"] and lr[0]["trigger_time"] < "08:00")
+    rows = replay_ticker("SPY", prev + sorted(lon + day, key=lambda b: b.ts), [], "Backtest", E.settings(), {"2026-10-29"})
+    check("stocks and ETFs stay New York only", {r["session_name"] for r in rows} == {"NY"})
+
+
+def test_short_rules():
+    sim = {**SIM, "partial_at_t1": 1.0, "be_after_r": 0.5, "time_stop_min": 60}
+    sh = {"side": "SHORT", "entry": 100, "stop": 101, "t1": 98, "t2": 97, "snap_min": 620}
+    # fills, moves 0.6R in favour, then comes back through the entry: breakeven, not -1R
+    o = simulate(sh, bars([[99.5, 100.1, 99.6, 99.9], [99.9, 100.0, 99.4, 99.5], [99.5, 101.2, 99.5, 101]]), sim)
+    check("short: breakeven after +0.5R", o["outcome"] == "Breakeven stop" and abs(o["r_plan"]) < 1e-9)
+    flat = [[99.5, 100.1, 99.6, 99.9]] + [[99.9, 100.0, 99.7, 99.85]] * 70
+    o = simulate(sh, bars(flat), sim)
+    check("short: 60-minute time stop", o["outcome"] == "Time stop" and o["mins_in_trade"] <= 61)
+    s = {"side": "SHORT", "overlap": True, "rr1": 1.5, "rr2": 2.2, "score": 70, "entry": 100.0, "stop": 100.1,
+         "swept": ["ORH"], "bias": "Bullish", "snap_min": 615, "ticker": "SQQQ"}
+    E.qualify(s, E.settings())
+    check("short guardrails block a weak short", not s["qualified"] and s["base_qualified"] and len(s["filter_reasons"]) == 6)
+    l = {**s, "side": "LONG"}
+    E.qualify(l, E.settings())
+    check("longs are not held to the short guardrails", l["qualified"])
+
+
 if __name__ == "__main__":
+    test_short_rules()
+    test_overnight_futures()
+    test_ladder()
     test_simulate()
     test_detection_and_replay()
     print("All checks passed.")

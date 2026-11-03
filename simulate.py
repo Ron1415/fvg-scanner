@@ -24,6 +24,8 @@ def simulate(sn: dict, bars: list, sim: dict = C.SIM) -> dict:
         return out
     start = max(sn["snap_min"], sim["entry_start"])
     cutoff, p = sim["entry_cutoff"], sim["partial_at_t1"]
+    be_r, ts_min = sim.get("be_after_r"), sim.get("time_stop_min")   # optional closer management (shorts)
+    stop_now, plan_exit = S, None
     fill = fill_min = None
     hi, lo, ran_away = float("-inf"), float("inf"), False
     a = b2 = leg1 = leg2 = None
@@ -64,13 +66,17 @@ def simulate(sn: dict, bars: list, sim: dict = C.SIM) -> dict:
                 leg2 = R(Cc); plan = "T1 then EOD"
             out["exit_min"] = bar.min
             break
+        if ts_min and not t1_hit and leg1 is None and bar.min - fill_min >= ts_min:
+            leg1 = leg2 = R(Cc); plan = "Time stop"
         if a is None:
             a = R(S) if L <= S else R(T1) if H >= T1 else None
         if b2 is None:
             b2 = R(S) if L <= S else R(T2) if H >= T2 else None
-        if not t1_hit:
-            if L <= S:
-                leg1 = leg2 = R(S); plan = "Stop"
+        if leg1 is not None and not t1_hit:
+            pass                                    # time stop already closed the plan legs
+        elif not t1_hit:
+            if L <= stop_now:
+                leg1 = leg2 = R(stop_now); plan = "Stop" if stop_now == S else "Breakeven stop"
             elif H >= T1:
                 t1_hit, leg1 = True, R(T1)
                 if H >= T2:
@@ -80,6 +86,10 @@ def simulate(sn: dict, bars: list, sim: dict = C.SIM) -> dict:
                 leg2 = 0.0; plan = "T1 then breakeven"
             elif H >= T2:
                 leg2 = R(T2); plan = "T1 then T2"
+        if plan_exit is None and leg1 is not None and leg2 is not None:
+            plan_exit = bar.min                     # when the plan itself was fully closed
+        if be_r and not t1_hit and (H - fill) / risk >= be_r:
+            stop_now = max(stop_now, fill)          # takes effect from the next bar (conservative)
         if None not in (leg1, leg2, a, b2):
             out["exit_min"] = bar.min
             break
@@ -92,6 +102,8 @@ def simulate(sn: dict, bars: list, sim: dict = C.SIM) -> dict:
             leg2 = R(last_c); plan = "T1 then EOD"
         if out["exit_min"] is None:
             out["exit_min"] = last_min
+        if plan_exit is not None:
+            out["exit_min"] = plan_exit
         r_plan = p * leg1 + (1 - p) * leg2
         cost_r = 2 * sim["cost_pct_per_side"] / 100 * abs(fill) / risk   # round trip, in R
         out.update(triggered=True, trigger_min=fill_min, fill=d * fill, outcome=plan, r_plan=r_plan, r_t1=a, r_t2=b2,

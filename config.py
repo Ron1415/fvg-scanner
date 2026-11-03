@@ -69,9 +69,24 @@ SIM = {
 # Side-by-side improvement tests (every simulated setup is re-run with each).
 # The live rules do not change until Ron approves a winner.
 TESTS = {
-    "entries": ["ote_mid", "fvg_edge", "fvg_ce"],     # current, first touch of the gap, gap midpoint
+    # ote_mid = current (middle of the FVG/OTE overlap); fvg_edge = first touch of the gap;
+    # fvg_ce = gap midpoint; blend = halfway between the gap's near edge and ote_mid (added Nov 3,
+    # Ron's idea); ote_62 = first touch of the OTE zone (62% retracement)
+    "entries": ["ote_mid", "fvg_edge", "fvg_ce", "blend", "ote_62"],
     "stop_buffers": [0.1, 0.3],                        # ATR beyond the sweep extreme
+    # Scaled entries: several limit orders, one shared stop and targets. Weights = share of the
+    # full position at each price (shallowest first). Results are in R of the full planned risk.
+    "ladders": {
+        "ladder_equal": [("fvg_edge", 1 / 3), ("blend", 1 / 3), ("ote_mid", 1 / 3)],
+        "ladder_deep": [("fvg_edge", 0.2), ("blend", 0.3), ("ote_mid", 0.5)],
+    },
 }
+
+# Futures 24-hour test (Nov 3, 2026): besides New York (9:30-4:00 ET), futures are also
+# replayed in two overnight sessions. Start = minutes after midnight ET; length in minutes.
+# Asia starts the evening before the trading day. Stocks and ETFs stay New York only.
+SESSIONS_24H = True
+FUTURES_SESSIONS = {"Asia": (18 * 60, 360), "London": (2 * 60, 360)}
 
 # ----------------------------------------------------------------- learning
 TRAINING_MODE = True
@@ -79,7 +94,30 @@ AUTO_TUNE = {                   # Ron chose auto-apply with guardrails (Nov 2, 2
     "enabled": True, "min_samples": 20, "delta_r": 0.15, "weight_step": 2, "max_changes": 3,
     "weight_bounds": (0, 30), "min_rr_t2_bounds": (1.5, 3.0), "min_score_bounds": (0, 80),
 }
-RISK_PCT = 1.0                  # dashboard position sizing
+# Dashboard position sizing (Nov 3, 2026): risk up to RISK_PCT of the account per trade, but the
+# whole position (all scaled entries together) is capped at MAX_POSITION_PCT of the account value.
+RISK_PCT = 1.0
+MAX_POSITION_PCT = 5.0
+# Side sizing (Nov 3, 2026, Ron: lower risk for shorts, a bit higher for longs). Risk is a share
+# of the account; the position cap is the value of all legs together as a share of the account.
+SIZING = {"LONG": {"risk_pct": 1.25, "max_position_pct": 5.0},
+          "SHORT": {"risk_pct": 0.5, "max_position_pct": 2.5}}
+
+# Short guardrails: a short must pass every check below as well as the normal filters.
+# Each check is recorded per setup, so the review shows shorts with and without it.
+SHORT_RULES = {
+    "enabled": True,
+    "require_bearish_bias": True,     # daily trend down (close below a falling 20-day average)
+    "require_strong_sweep": True,     # swept the prior-day high, or 2+ levels at once
+    "min_rr_t2": 3.0,                 # longs: FILTERS["min_rr_t2"]
+    "min_risk_pct": 0.3,              # stop at least 0.3% of price away (costs and noise)
+    "not_before": 630,                # no shorts formed before 10:30 ET (New York session)
+    "no_leveraged_etfs": True,
+}
+# Closer management for shorts: full exit at T1, stop to breakeven once the trade is +0.5R,
+# and exit after 60 minutes if T1 has not been reached. Longs keep the plan in SIM.
+SIDE_MGMT = {"LONG": {}, "SHORT": {"partial_at_t1": 1.0, "be_after_r": 0.5, "time_stop_min": 60}}
+DASHBOARD_LADDER = "ladder_deep"   # the scaled-entry plan shown on the dashboard
 
 # ----------------------------------------------------------------- data
 # A free Alpaca account (alpaca.markets) gives years of 5-minute stock/ETF history.
