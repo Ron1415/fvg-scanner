@@ -1,12 +1,12 @@
 {
- "run_at": "2026-11-04 18:11 ET",
+ "run_at": "2026-11-04 18:33 ET",
  "sessions": [
   "2026-05-07",
   "2026-11-03"
  ],
  "days": 125,
  "symbols": 74,
- "trades": 6408,
+ "trades": 5830,
  "source": "Alpaca 1-minute (SIP)",
  "rules": {
   "daily_up": true,
@@ -15,5 +15,5 @@
   "fib": true,
   "trendline": true
  },
- "version": 2
+ "version": 3
 }
