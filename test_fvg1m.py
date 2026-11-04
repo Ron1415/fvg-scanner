@@ -53,7 +53,7 @@ def winner_closes(after):
 def test_core_trade():
     up = path((101.2, 0), (101.6, 5), (102.6, 20), (102.8, 30))[1:]
     day = make_day("2026-10-29", winner_closes(up) + [102.8] * 300)
-    tr = F.run_day(day, day, F.bars_15m(day), True, dict(K.RULES))
+    tr = F.run_day(day, day, F.bars_15m(day), True, F.settings())
     check("core model takes exactly one trade", len(tr) == 1)
     t = tr[0]
     for f in ("daily_up", "vwap", "orb", "fib", "trendline"):
@@ -61,49 +61,75 @@ def test_core_trade():
     check("entry at the FVG midpoint", t["gap_lo"] < t["entry"] < t["gap_hi"] and abs(t["entry"] - (t["gap_lo"] + t["gap_hi"]) / 2) < 0.03)
     check("stop below the gap, at least 0.20% of price", t["stop"] < t["gap_lo"] and t["risk_pct"] >= 0.2 - 1e-9)
     check("first target is 4R", abs(t["t1"] - (t["entry"] + 4 * (t["entry"] - t["stop"]))) < 1e-9)
-    check("winner: half at 4R, runner to the close (no magnet above)", t["exit"] == "4R then close" and t["r_plan"] > 2)
+    check("winner: half at 4R, runner to the close (no magnet above)", t["exit"] == "Target then close" and t["r_plan"] > 2)
     check("full exit at 4R is about +4R less costs", abs(t["r_full4r"] - (4 - t["cost_r"])) < 1e-9)
     # nothing without the daily up-trend
-    check("no trade when the daily trend is not up", not F.run_day(day, day, F.bars_15m(day), False, dict(K.RULES)))
+    check("no trade when the daily trend is not up", not F.run_day(day, day, F.bars_15m(day), False, F.settings()))
 
 
 def test_loser_and_breakeven():
     down = path((101.2, 0), (100.9, 4), (100.5, 10))[1:]
     day = make_day("2026-10-29", winner_closes(down) + [100.5] * 300)
-    t = F.run_day(day, day, F.bars_15m(day), True, dict(K.RULES))[0]
+    t = F.run_day(day, day, F.bars_15m(day), True, F.settings())[0]
     check("loser stops out at about -1R", t["exit"] == "Stop" and -1.4 < t["r_plan"] < -1)
     be = path((101.2, 0), (101.85, 4), (101.0, 6))[1:]    # closes above the recent high, then fails
     day = make_day("2026-10-29", winner_closes(be) + [101.0] * 300)
-    t = F.run_day(day, day, F.bars_15m(day), True, dict(K.RULES))[0]
+    t = F.run_day(day, day, F.bars_15m(day), True, F.settings())[0]
     check("stop moves to breakeven after a close above the recent high", t["exit"] == "Breakeven" and abs(t["r_plan"] + t["cost_r"]) < 1e-9)
 
 
 def test_no_lookahead_and_magnet():
     up = path((101.2, 0), (101.6, 5), (102.6, 20), (104.8, 30))[1:]
     day = make_day("2026-10-29", winner_closes(up) + [104.8] * 300)
-    full = F.run_day(day, day, F.bars_15m(day), True, dict(K.RULES))[0]
+    full = F.run_day(day, day, F.bars_15m(day), True, F.settings())[0]
     cut = [b for b in day if b.min <= 570 + len(winner_closes([]))]
-    part = F.run_day(cut, cut, F.bars_15m(cut), True, dict(K.RULES))
+    part = F.run_day(cut, cut, F.bars_15m(cut), True, F.settings())
     check("same entry whether or not later bars exist", part and abs(part[0]["entry"] - full["entry"]) < 1e-9)
     # a prior-day 15-minute bearish gap above 4R becomes the runner's target
     prev = make_day("2026-10-28", path((104.5, 0), (104.6, 15), (104.0, 1), (103.7, 14), (103.6, 30)) + [103.6] * 300)
     gap = [b._replace(h=104.62, l=104.55) if b.min < 585 else b._replace(h=min(b.h, 104.2)) if b.min < 600 else b._replace(h=min(b.h, 103.9)) for b in prev]
     span = gap + day
-    t = F.run_day(day, span, F.bars_15m(span), True, dict(K.RULES))[0]
+    t = F.run_day(day, span, F.bars_15m(span), True, F.settings())[0]
     check("15-minute FVG above 4R is the runner target", t["magnet"] is not None and t["magnet"] > t["t1"])
-    check("runner exits at the magnet", t["exit"] == "4R then magnet")
+    check("runner exits at the magnet", t["exit"] == "Target then magnet")
 
 
 def test_rules_matter():
     flat = path((101.2, 0), (101.6, 5), (102.6, 20), (102.8, 30))[1:]
     closes = winner_closes(flat) + [102.8] * 300
     day = make_day("2026-10-29", closes)
-    check("structure-only run trades as well", F.run_day(day, day, F.bars_15m(day), True, {r: False for r in K.RULES}))
+    check("structure-only run trades as well", F.run_day(day, day, F.bars_15m(day), True, F.settings({r: False for r in K.RULES})))
     low_or = [c if i >= 15 else c + 1.5 for i, c in enumerate(closes)]   # opening range far above: never broken
     d2 = make_day("2026-10-29", low_or)
-    check("no trade when the opening range was never broken upward", not F.run_day(d2, d2, F.bars_15m(d2), True, dict(K.RULES)))
+    check("no trade when the opening range was never broken upward", not F.run_day(d2, d2, F.bars_15m(d2), True, F.settings()))
     check("...but the same day trades with the opening-range rule off",
-          bool(F.run_day(d2, d2, F.bars_15m(d2), True, {**K.RULES, "orb": False, "vwap": False})))
+          bool(F.run_day(d2, d2, F.bars_15m(d2), True, F.settings({"orb": False, "vwap": False}))))
+
+
+def test_version2():
+    up = path((101.2, 0), (101.6, 5), (102.6, 20), (102.8, 30))[1:]
+    day = make_day("2026-10-29", winner_closes(up) + [102.8] * 300)
+    core = F.run_day(day, day, F.bars_15m(day), True, F.settings())[0]
+    sw = F.run_day(day, day, F.bars_15m(day), True, F.settings({"stop": "swing"}))[0]
+    check("swing-low stop sits below the swing low", sw["stop"] < sw["swing_low"] and sw["stop"] < core["stop"])
+    t3 = F.run_day(day, day, F.bars_15m(day), True, F.settings({"target_r": 3.0}))[0]
+    check("3R variant targets 3R", abs(t3["t1"] - (t3["entry"] + 3 * (t3["entry"] - t3["stop"]))) < 1e-9)
+    check("realistic cost: the target leg is free, the runner pays a cent at the close",
+          abs(core["cost_real_r"] - 0.5 * K.SLIP_PER_SHARE / (core["entry"] - core["stop"])) < 1e-9)
+    down = path((101.2, 0), (100.9, 4), (100.5, 10))[1:]
+    lday = make_day("2026-10-29", winner_closes(down) + [100.5] * 300)
+    lt = F.run_day(lday, lday, F.bars_15m(lday), True, F.settings())[0]
+    check("realistic cost on a stop = one cent", abs(lt["r_real"] - (lt["r_gross"] - K.SLIP_PER_SHARE / (lt["entry"] - lt["stop"]))) < 1e-9)
+    old = K.ENTRY_START
+    K.ENTRY_START = 660
+    try:
+        check("no fills before the entry start time", not F.run_day(day, day, F.bars_15m(day), True, F.settings()))
+    finally:
+        K.ENTRY_START = old
+    # a pullback that only touches the midpoint (no trade-through) does not fill
+    e = core["entry"]
+    touch = [b._replace(l=max(b.l, e)) if b.min >= 570 + 70 else b for b in day]
+    check("a touch without trading through does not fill", not F.run_day(touch, touch, F.bars_15m(touch), True, F.settings()))
 
 
 if __name__ == "__main__":
@@ -111,4 +137,5 @@ if __name__ == "__main__":
     test_loser_and_breakeven()
     test_no_lookahead_and_magnet()
     test_rules_matter()
+    test_version2()
     print("All checks passed.")

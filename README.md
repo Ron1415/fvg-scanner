@@ -67,6 +67,8 @@ A separate, simpler model on 1-minute bars: `fvg1m.py`, settings in `config_1m.p
 4. **Entry:** a limit order at the FVG midpoint, which must sit at the 50-61.8% retracement of the move and on the broken falling trendline.
 5. **Risk and exits:** stop below the FVG (at least 0.20% of price); half off at 4R; stop to breakeven once a close clears the recent high; the rest rides to the next untouched 15-minute FVG above, or the 3:55 PM close.
 
+**Version 2 (Nov 4, 2026):** stocks plus SPY only; fills from 10:30; a limit order fills only if price trades a cent through it; a realistic cost column (limit orders free, $0.01/share on stops and the close); stop variants (below the FVG or below the swing low) with 4R and 3R targets. The review chooses the variant on May-August and confirms it on September onward.
+
 **Backtest:** run the workflow with mode `fvg1m` and 125 days (needs the Alpaca keys for 1-minute history). Results go to `review_1m.md` and `backtest_1m/trades.csv.gz`. Section 1 of the review switches each rule off in turn, so it shows what every rule adds.
 
 ## Trendline retest confluence (added November 4, 2026)

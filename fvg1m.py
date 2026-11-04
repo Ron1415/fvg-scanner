@@ -109,7 +109,8 @@ def manage(t: dict, bars: list, mode: str) -> tuple[float, str, int]:
     """Bars after the fill bar. mode: plan (half at 4R, rest to the 15-minute magnet or the close),
     full4r (everything at 4R), eod (half at 4R, rest held to the close). Breakeven once a 1-minute
     close is above the recent high. When a bar touches both the stop and a target, the stop wins.
-    Returns (R before costs, exit reason, exit minute)."""
+    Returns (R before costs, exit reason, exit minute, share of the position closed at market).
+    Targets and magnets are limit orders; stops, breakevens and the close are market exits."""
     e, risk, t1 = t["entry"], t["entry"] - t["stop"], t["t1"]
     runner = t["magnet"] if mode == "plan" else None
     part = 1.0 if mode == "full4r" else K.PARTIAL_AT_TARGET
@@ -117,25 +118,35 @@ def manage(t: dict, bars: list, mode: str) -> tuple[float, str, int]:
     R = lambda px: (px - e) / risk
     for b in bars:
         if b.min >= K.EOD_EXIT:
-            return r + (1 - done) * R(b.c), ("4R then close" if hit else "Close"), b.min
+            return r + (1 - done) * R(b.c), ("Target then close" if hit else "Close"), b.min, 1 - done
         if b.l <= stop:
-            return r + (1 - done) * R(stop), ("4R then breakeven" if hit else "Breakeven" if stop >= e else "Stop"), b.min
+            return r + (1 - done) * R(stop), ("Target then breakeven" if hit else "Breakeven" if stop >= e else "Stop"), b.min, 1 - done
         if not hit and b.h >= t1:
             hit, r, done = True, part * R(t1), part
             if done >= 1:
-                return r, "4R", b.min
+                return r, "Target", b.min, 0.0
         if hit and runner and b.h >= runner:
-            return r + (1 - done) * R(runner), "4R then magnet", b.min
+            return r + (1 - done) * R(runner), "Target then magnet", b.min, 0.0
         if b.c > t["recent_high"] or hit:
             stop = max(stop, e)        # breakeven from the next bar
     last = bars[-1] if bars else None
-    return (r + (1 - done) * R(last.c) if last else 0.0), "End of data", (last.min if last else None)
+    return (r + (1 - done) * R(last.c) if last else 0.0), "End of data", (last.min if last else None), 1 - done
 
 
 # ----------------------------------------------------------------- the walk
-def run_day(day: list, hist: list, b15: list, up: bool, rules: dict) -> list[dict]:
+def settings(over: dict | None = None) -> dict:
+    """Rules and parameters for one run: config_1m defaults with a RUNS entry's overrides."""
+    over = over or {}
+    return {"rules": {r: over.get(r, on) for r, on in K.RULES.items()},
+            "stop": over.get("stop", K.STOP_MODE), "target_r": over.get("target_r", K.TARGET_R)}
+
+
+def run_day(day: list, hist: list, b15: list, up: bool, cfg: dict | None = None) -> list[dict]:
     """day: today's 1-minute regular-session bars; hist: 1-minute bars of the prior MAGNET_DAYS
-    sessions plus today (for the magnet check); b15: 15-minute bars of the same span."""
+    sessions plus today (for the magnet check); b15: 15-minute bars of the same span.
+    cfg: settings() for the run (default: the core model)."""
+    cfg = cfg or settings()
+    rules, tgt = cfg["rules"], cfg["target_r"]
     n = len(day)
     if n < 30:
         return []
@@ -159,22 +170,27 @@ def run_day(day: list, hist: list, b15: list, up: bool, rules: dict) -> list[dic
             or_broken = True
         # 1. a working order fills on this bar?
         if order is not None:
-            if L[i] <= order["entry"] and b.min < K.ENTRY_END:
+            # a limit order needs price to trade THROUGH it by FILL_THROUGH (a touch may not fill)
+            if L[i] <= order["entry"] - K.FILL_THROUGH and b.min < K.ENTRY_END:
                 fill = min(order["entry"], O[i])
                 if fill > order["stop"]:
                     t = {**order, "entry": fill, "fill_min": b.min, "fill_i": i}
-                    t["t1"] = fill + K.TARGET_R * (fill - t["stop"])
+                    t["t1"] = fill + tgt * (fill - t["stop"])
                     mg = [m for m in magnets(b15, hist, b.ts, fill) if m > t["t1"]]
                     allm = magnets(b15, hist, b.ts, fill)
                     t["magnet"] = mg[0] if mg else None
                     t["magnet_before_t1"] = bool(allm and allm[0] < t["t1"])
                     if L[i] <= t["stop"]:             # the fill bar itself can only stop out
-                        res = {m: (-1.0, "Stop", b.min) for m in ("plan", "full4r", "eod")}
+                        res = {m: (-1.0, "Stop", b.min, 1.0) for m in ("plan", "full4r", "eod")}
                     else:
                         res = {m: manage(t, day[i + 1:], m) for m in ("plan", "full4r", "eod")}
-                    cost = 2 * K.COST_PCT_PER_SIDE / 100 * fill / (fill - t["stop"])
+                    risk = fill - t["stop"]
+                    cost = 2 * K.COST_PCT_PER_SIDE / 100 * fill / risk
+                    # realistic cost: no slippage on limit orders (entry, targets), SLIP_PER_SHARE on market exits
+                    real = res["plan"][3] * K.SLIP_PER_SHARE / risk
                     t.update(r_plan=res["plan"][0] - cost, exit=res["plan"][1], exit_min=res["plan"][2],
-                             r_full4r=res["full4r"][0] - cost, r_eod=res["eod"][0] - cost, cost_r=cost)
+                             r_full4r=res["full4r"][0] - cost, r_eod=res["eod"][0] - cost, cost_r=cost,
+                             r_gross=res["plan"][0], r_real=res["plan"][0] - real, cost_real_r=real)
                     trades.append(t)
                     pos = t
                 order = setup = None
@@ -220,7 +236,8 @@ def run_day(day: list, hist: list, b15: list, up: bool, rules: dict) -> list[dic
             continue
         _, j, ce, ret = best
         gap_lo, gap_hi = H[j - 1], L[j + 1]
-        stop = min(gap_lo - K.STOP_ATR * atr[i], ce * (1 - K.MIN_RISK_PCT / 100))
+        base = setup["low"] if cfg["stop"] == "swing" else gap_lo   # below the swing low, or below the FVG
+        stop = min(base - K.STOP_ATR * atr[i], ce * (1 - K.MIN_RISK_PCT / 100))
         tl, line = setup["tl"], None
         if tl:
             a, sl, _t = tl
@@ -259,9 +276,8 @@ def run_ticker(ticker: str, bars: list, closes: list, dates: set, runs: dict) ->
         span = [b for x in days[di - K.MAGNET_DAYS:di + 1] for b in by[x]]
         b15 = bars_15m(span)
         up = daily_up([c for x, c in closes if x < d])
-        for name, off in runs.items():
-            rules = {**K.RULES, **off}
-            for t in run_day(by[d], span, b15, up, rules):
+        for name, over in runs.items():
+            for t in run_day(by[d], span, b15, up, settings(over)):
                 out.append({"run": name, "ticker": ticker, **t})
     return out
 
@@ -283,7 +299,8 @@ def backtest(days: int) -> None:
     import data as D
     import scanner as S
     u = S.universe()
-    tickers = [t for t in u["tickers"] if "=F" not in t and t not in K.EXCLUDE]
+    import config as C0
+    tickers = [t for t in u["tickers"] if "=F" not in t and (t not in C0.ETF_CANDIDATES or t in K.ALLOW_ETFS)]
     spy = D.yahoo_daily(["SPY"], "2y")["SPY"]
     today = dt.datetime.now(NY).strftime("%Y-%m-%d")
     sessions = [d for d in spy.index if d < today][-days:]
@@ -305,23 +322,24 @@ def backtest(days: int) -> None:
     meta = {"run_at": dt.datetime.now(NY).strftime("%Y-%m-%d %H:%M ET"), "sessions": [sessions[0], sessions[-1]],
             "days": days, "symbols": len(tickers), "trades": len(df),
             "source": "Alpaca 1-minute (SIP)" if D.alpaca_enabled() else "Yahoo 1-minute (about 7 days only)",
-            "rules": K.RULES}
+            "rules": K.RULES, "version": K.VERSION}
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     review()
 
 
 # ----------------------------------------------------------------- review
-def stats(r: pd.Series) -> dict:
-    r = r.dropna().to_numpy(float)
-    if not len(r):
+def stats(d: pd.DataFrame, col: str = "r_plan") -> dict:
+    """d: trades sorted by time. Design = sessions before SPLIT_DATE, confirm = on or after it."""
+    if not len(d):
         return {"n": 0}
+    r = d[col].to_numpy(float)
     eq = np.cumsum(r)
-    half = len(r) // 2
     loss = -r[r < 0].sum()
+    a, b = d.loc[d["date"] < K.SPLIT_DATE, col], d.loc[d["date"] >= K.SPLIT_DATE, col]
     return {"n": len(r), "win": (r > 0).mean(), "avg": r.mean(), "pf": r[r > 0].sum() / loss if loss else None,
             "total": r.sum(), "dd": float((eq - np.maximum.accumulate(np.maximum(eq, 0))).min()),
-            "h1": r[:half].mean() if half else None, "h2": r[half:].mean() if len(r) - half else None,
-            "big": (r >= K.TARGET_R * K.PARTIAL_AT_TARGET).mean()}
+            "d1": a.mean() if len(a) else None, "n1": len(a), "d2": b.mean() if len(b) else None, "n2": len(b),
+            "real": d["r_real"].mean() if col == "r_plan" and "r_real" in d else None}
 
 
 def _fmt(v, pct=False):
@@ -331,53 +349,76 @@ def _fmt(v, pct=False):
 
 
 def table(rows: list[tuple[str, dict]]) -> str:
-    h = "| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | 1st half avg R | 2nd half avg R |\n|---|---|---|---|---|---|---|---|---|\n"
+    h = ("| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | Design avg R (to Aug) | "
+         "Confirm avg R (Sep on) | Avg R, realistic cost |\n|---|---|---|---|---|---|---|---|---|---|\n")
     for name, s in rows:
         if not s.get("n"):
-            h += f"| {name} | 0 | | | | | | | |\n"
+            h += f"| {name} | 0 | | | | | | | | |\n"
             continue
         h += (f"| {name} | {s['n']} | {_fmt(s['win'], True)} | {_fmt(s['avg'])} | {_fmt(s['pf'])} | {_fmt(s['total'])} | "
-              f"{_fmt(s['dd'])} | {_fmt(s['h1'])} | {_fmt(s['h2'])} |\n")
+              f"{_fmt(s['dd'])} | {_fmt(s['d1'])} (n={s['n1']}) | {_fmt(s['d2'])} (n={s['n2']}) | {_fmt(s['real'])} |\n")
     return h
 
 
 def review() -> str:
     p = ROOT / "backtest_1m" / "trades.csv.gz"
-    meta = json.loads((ROOT / "backtest_1m" / "meta.json").read_text()) if (ROOT / "backtest_1m" / "meta.json").exists() else {}
-    df = pd.read_csv(p) if p.exists() and p.stat().st_size > 30 else pd.DataFrame(columns=["run"])
-    if len(df):
-        df = df.sort_values(["date", "fill_time"])
-    md = [f"# 1-minute FVG model review: {dt.datetime.now(NY).strftime('%Y-%m-%d %H:%M ET')}\n",
+    mp = ROOT / "backtest_1m" / "meta.json"
+    meta = json.loads(mp.read_text()) if mp.exists() else {}
+    df = pd.read_csv(p) if p.exists() and p.stat().st_size > 30 else pd.DataFrame(columns=["run", "date", "fill_time"])
+    df = df.sort_values(["date", "fill_time"]) if len(df) else df
+    if "r_real" not in df:
+        df["r_real"] = np.nan
+    runs = [r for r in K.RUNS if r in set(df["run"])] or list(K.RUNS)
+    md = [f"# 1-minute FVG model review (version {meta.get('version', 1)}): {dt.datetime.now(NY).strftime('%Y-%m-%d %H:%M ET')}\n\n",
           f"Data: {meta.get('source', '?')}, {meta.get('sessions', ['?', '?'])[0]} to {meta.get('sessions', ['?', '?'])[-1]}, "
-          f"{meta.get('symbols', '?')} symbols. Long only. Results in R, net of {K.COST_PCT_PER_SIDE}% per side.\n\n"]
-    md.append("## 1. Each rule switched off in turn (current plan: half at 4R, rest to the 15-minute magnet)\n\n")
-    md.append(table([(r, stats(df.loc[df["run"] == r, "r_plan"])) for r in K.RUNS]))
-    core = df[df["run"] == "core"] if len(df) else df
+          f"{meta.get('symbols', '?')} symbols (stocks plus {', '.join(K.ALLOW_ETFS)}). Long only. Avg R is net of the standard "
+          f"cost ({K.COST_PCT_PER_SIDE}% per side). Realistic cost = limit orders free, ${K.SLIP_PER_SHARE}/share on stops "
+          f"and the close. Fills 10:30-15:00; a limit fills only if price trades ${K.FILL_THROUGH} through it.\n\n"]
+    # 1. variants; pick the best on the design period, report its confirmation
+    md.append("## 1. Stop and target variants (half at the target, rest to the 15-minute magnet)\n\n")
+    vs = {v: stats(df[df["run"] == v]) for v in K.VARIANTS}
+    md.append(table(list(vs.items())))
+    ok = {v: s for v, s in vs.items() if s.get("n1", 0) >= 50 and s.get("d1") is not None}
+    if ok:
+        best = max(ok, key=lambda v: ok[v]["d1"])
+        s = ok[best]
+        verdict = ("PASSES" if (s["d1"] > 0 and (s["d2"] or -1) > 0) else "FAILS")
+        md.append(f"\n**Chosen on May-August: {best}** ({_fmt(s['d1'])}R, n={s['n1']}). "
+                  f"Confirmation from September: {_fmt(s['d2'])}R (n={s['n2']}). The out-of-sample check {verdict} "
+                  "(both periods must be above zero after the standard cost).\n")
+    else:
+        best = K.VARIANTS[0]
+        md.append("\nToo few design-period trades (under 50) to choose a variant.\n")
+    md.append("\n## 2. Each rule switched off in turn (FVG stop, 4R)\n\n")
+    md.append(table([(r, stats(df[df["run"] == r])) for r in runs if r not in K.VARIANTS[1:]]))
+    core = df[df["run"] == best]
     if len(core):
-        md.append("\n## 2. Core model: exit methods\n\n")
-        md.append(table([("Half at 4R, rest to the 15-minute magnet (plan)", stats(core["r_plan"])),
-                         ("Everything at 4R", stats(core["r_full4r"])),
-                         ("Half at 4R, rest held to the close", stats(core["r_eod"]))]))
+        md.append(f"\n## 3. {best}: exit methods\n\n")
+        md.append(table([("Half at the target, rest to the 15-minute magnet (plan)", stats(core)),
+                         ("Everything at the target", stats(core, "r_full4r")),
+                         ("Half at the target, rest held to the close", stats(core, "r_eod")),
+                         ("Plan, before any cost", stats(core, "r_gross"))]))
         tmin = core["fill_time"].str.slice(0, 2).astype(int) * 60 + core["fill_time"].str.slice(3, 5).astype(int)
-        md.append("\n## 3. Core model: by entry time, risk size, room to the first magnet\n\n")
-        md.append(table([("Filled 9:45-10:30", stats(core.loc[tmin < 630, "r_plan"])),
-                         ("Filled 10:30-12:00", stats(core.loc[(tmin >= 630) & (tmin < 720), "r_plan"])),
-                         ("Filled 12:00-15:00", stats(core.loc[tmin >= 720, "r_plan"])),
-                         ("Risk 0.20-0.35% of price", stats(core.loc[core["risk_pct"] < 0.35, "r_plan"])),
-                         ("Risk 0.35%+ of price", stats(core.loc[core["risk_pct"] >= 0.35, "r_plan"])),
-                         ("A 15-minute magnet sits before 4R", stats(core.loc[core["magnet_before_t1"].astype(str) == "True", "r_plan"])),
-                         ("Clear path to 4R", stats(core.loc[core["magnet_before_t1"].astype(str) != "True", "r_plan"])),
-                         ("Trendline with 3+ touches", stats(core.loc[core["tl_touches"] >= 3, "r_plan"]))]))
-        md.append("\n## 4. Core model: exits and costs\n\n")
-        md.append("| Exit | Trades |\n|---|---|\n" + "".join(f"| {k} | {v} |\n" for k, v in core["exit"].value_counts().items()))
-        md.append(f"\nAverage cost per trade: {core['cost_r'].mean():.2f}R. Trades reaching 4R: "
-                  f"{core['exit'].str.startswith('4R').mean() * 100:.1f}%. Median risk: {core['risk_pct'].median():.2f}% of price.\n")
+        md.append(f"\n## 4. {best}: by symbol type, entry time, risk size, room to the first magnet\n\n")
+        md.append(table([("SPY", stats(core[core["ticker"] == "SPY"])),
+                         ("Stocks", stats(core[core["ticker"] != "SPY"])),
+                         ("Filled 10:30-12:00", stats(core[tmin < 720])),
+                         ("Filled 12:00-15:00", stats(core[tmin >= 720])),
+                         ("Risk under 0.35% of price", stats(core[core["risk_pct"] < 0.35])),
+                         ("Risk 0.35%+ of price", stats(core[core["risk_pct"] >= 0.35])),
+                         ("A 15-minute magnet sits before the target", stats(core[core["magnet_before_t1"].astype(str) == "True"])),
+                         ("Clear path to the target", stats(core[core["magnet_before_t1"].astype(str) != "True"]))]))
+        md.append(f"\n## 5. {best}: exits and costs\n\n| Exit | Trades |\n|---|---|\n")
+        md.append("".join(f"| {k} | {v} |\n" for k, v in core["exit"].value_counts().items()))
+        md.append(f"\nStandard cost: {core['cost_r'].mean():.2f}R per trade. Realistic cost: {core['cost_real_r'].mean():.2f}R. "
+                  f"Trades reaching the target: {core['exit'].str.startswith('Target').mean() * 100:.1f}%. "
+                  f"Median risk: {core['risk_pct'].median():.2f}% of price.\n")
         top = core.groupby("ticker")["r_plan"].agg(["count", "mean", "sum"]).sort_values("sum", ascending=False)
-        md.append("\n## 5. Core model by symbol (top and bottom 8 by total R)\n\n| Symbol | Trades | Avg R | Total R |\n|---|---|---|---|\n")
+        md.append(f"\n## 6. {best} by symbol (top and bottom 8 by total R)\n\n| Symbol | Trades | Avg R | Total R |\n|---|---|---|---|\n")
         for t, r in pd.concat([top.head(8), top.tail(8)]).drop_duplicates().iterrows():
             md.append(f"| {t} | {int(r['count'])} | {r['mean']:.2f} | {r['sum']:.2f} |\n")
-    md.append("\nHow to read this: a rule earns its place when switching it off (section 1) lowers the average R in BOTH "
-              "halves. Fewer than about 100 core trades is too small a sample to trust.\n")
+    md.append("\nHow to read this: the variant is chosen on May-August only; September onward is the honest test. "
+              "A rule earns its place when switching it off (section 2) lowers the average R in both periods.\n")
     text = "".join(md)
     (ROOT / "review_1m.md").write_text(text)
     return text

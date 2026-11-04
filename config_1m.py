@@ -1,5 +1,10 @@
 """Settings for the 1-minute FVG model (fvg1m.py). Long only. Edit on GitHub (pencil icon).
 
+Version 2 (Nov 4, 2026, after the first 6-month backtest): stocks plus SPY only (other ETFs dropped),
+no fills before 10:30, limit orders must trade through by a cent, a realistic cost model alongside
+the standard one, and stop / target variants. Settings are chosen on May-August and confirmed on
+September-November (SPLIT_DATE).
+
 The setup, in order (Ron, Nov 4, 2026):
   1. Up-trend bias: daily trend up, price above VWAP, and the 15-minute opening range broken upward.
   2. Break of market structure on the 1-minute chart: a close above the last lower high.
@@ -21,7 +26,7 @@ RULES = {
 
 # ----------------------------------------------------------------- session (minutes after midnight, New York)
 OPEN, OR_END = 570, 585          # 15-minute opening range: 9:30-9:45
-ENTRY_START, ENTRY_END = 585, 900  # orders may fill 9:45 AM - 3:00 PM
+ENTRY_START, ENTRY_END = 630, 900  # orders may fill 10:30 AM - 3:00 PM (v1: 9:45-10:30 averaged -0.40R)
 EOD_EXIT = 955                   # anything open is sold at 3:55 PM
 
 # ----------------------------------------------------------------- structure
@@ -34,22 +39,31 @@ TL_PAD_ATR = 0.25                # trendline may sit up to 0.25 x 1-minute ATR o
 TL_TOL_ATR = 0.10                # closes may poke 0.1 ATR through the line before it is "broken"
 
 # ----------------------------------------------------------------- risk and exits
-STOP_ATR = 0.10                  # stop = FVG bottom - 0.1 x 1-minute ATR ...
+STOP_MODE = "fvg"                # "fvg" = below the FVG; "swing" = below the swing low of the break
+STOP_ATR = 0.10                  # stop = FVG bottom (or swing low) - 0.1 x 1-minute ATR ...
 MIN_RISK_PCT = 0.20              # ... widened to at least 0.20% of price (costs eat tiny stops)
 TARGET_R = 4.0                   # first target and minimum reward:risk
 PARTIAL_AT_TARGET = 0.5          # sell half at 4R; the rest rides
 MAGNET_DAYS = 2                  # 15-minute FVGs from today and the prior 2 sessions are magnets
-COST_PCT_PER_SIDE = 0.02         # slippage + fees, percent of price per side
+COST_PCT_PER_SIDE = 0.02         # standard cost: slippage + fees, percent of price per side (headline)
+SLIP_PER_SHARE = 0.01            # realistic cost: limit orders free, $0.01/share on market exits (stops, close)
+FILL_THROUGH = 0.01              # a limit buy fills only if price trades at least $0.01 below it
 
 # ----------------------------------------------------------------- backtest
-# Each run switches one rule off so the review shows what every rule adds.
+VERSION = 2
+SPLIT_DATE = "2026-09-01"        # choose on sessions before this date, confirm on sessions after it
+ALLOW_ETFS = ["SPY"]             # stocks plus these ETFs
+# Each run is the core model with some settings changed. The first four compare stops and targets;
+# the rest switch one rule off (with the core stop and target) to show what every rule adds.
 RUNS = {
-    "core": {},
+    "FVG stop, 4R (core)": {},
+    "FVG stop, 3R": {"target_r": 3.0},
+    "Swing-low stop, 4R": {"stop": "swing"},
+    "Swing-low stop, 3R": {"stop": "swing", "target_r": 3.0},
     "without daily trend": {"daily_up": False},
     "without VWAP": {"vwap": False},
     "without opening range": {"orb": False},
     "without Fibonacci": {"fib": False},
     "without trendline": {"trendline": False},
-    "structure + FVG only": {"daily_up": False, "vwap": False, "orb": False, "fib": False, "trendline": False},
 }
-EXCLUDE = ["TQQQ", "SQQQ", "SOXL", "SOXS", "SPXL", "SPXS", "TNA", "TZA", "UPRO", "SH", "PSQ", "TSLL", "NVDL"]
+VARIANTS = ["FVG stop, 4R (core)", "FVG stop, 3R", "Swing-low stop, 4R", "Swing-low stop, 3R"]

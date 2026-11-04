@@ -1,5 +1,5 @@
 //@version=6
-// FVG 1-Minute Long Model (Ron, Nov 4, 2026). Same rules as fvg1m.py in the fvg-scanner repository.
+// FVG 1-Minute Long Model, version 2 (Ron, Nov 4, 2026): stocks and SPY, fills from 10:30, stop variants. Same rules as fvg1m.py in the fvg-scanner repository.
 // Use on a 1-minute chart of a US stock or ETF with regular trading hours only (no extended hours).
 //   1. Up-trend bias: daily trend up, price above VWAP, 9:30-9:45 opening range broken upward.
 //   2. Break of structure: first close above the last lower high (swing high lower than the one before).
@@ -27,12 +27,14 @@ fibLo      = input.float(0.45, "Retracement zone from", step = 0.01, group = "St
 fibHi      = input.float(0.70, "Retracement zone to", step = 0.01, group = "Structure")
 tlPad      = input.float(0.25, "Trendline may sit outside the FVG by (x ATR)", step = 0.05, group = "Structure")
 tlTol      = input.float(0.10, "Closes may poke through the line by (x ATR)", step = 0.05, group = "Structure")
-stopAtr    = input.float(0.10, "Stop below the FVG by (x ATR)", step = 0.05, group = "Risk")
+stopMode   = input.string("Below the FVG", "Stop placement", options = ["Below the FVG", "Below the swing low"], group = "Risk")
+stopAtr    = input.float(0.10, "Stop below the FVG / swing low by (x ATR)", step = 0.05, group = "Risk")
 minRiskPct = input.float(0.20, "Minimum stop distance (% of price)", step = 0.05, group = "Risk")
 targetR    = input.float(4.0, "First target (R)", step = 0.5, group = "Risk")
 partialPct = input.int(50, "Sell at the first target (%)", minval = 1, maxval = 100, group = "Risk")
 riskPct    = input.float(1.0, "Risk per trade (% of equity)", step = 0.25, group = "Risk")
 maxPosPct  = input.float(5.0, "Maximum position (% of equity)", step = 1.0, group = "Risk")
+entryStart = input.int(630, "First fill (minutes after midnight NY; 630 = 10:30)", group = "Structure")
 useMagnets = input.bool(true, "Runner exits at the next untouched 15-minute FVG", group = "Risk")
 showLines  = input.bool(true, "Draw FVG, trendline and trade levels", group = "Display")
 
@@ -251,7 +253,8 @@ if hasSetup and canTrade
                         gHi := lo1
                         ret := r
     if not na(ce)
-        stop = math.min(gLo - stopAtr * atr1, ce * (1 - minRiskPct / 100))
+        base = stopMode == "Below the swing low" ? l0Low : gLo
+        stop = math.min(base - stopAtr * atr1, ce * (1 - minRiskPct / 100))
         pad = tlPad * atr1
         line1 = hasTl and tlBroken ? tlAPx + tlSl * (bar_index + 1 - tlA) : na
         okDaily = not useDaily or dailyUp
@@ -259,7 +262,7 @@ if hasSetup and canTrade
         okOrb = not useOrb or orBroken
         okFib = not useFib or (ret >= fibLo and ret <= fibHi)
         okTl = not useTl or (not na(line1) and line1 >= gLo - pad and line1 <= gHi + pad)
-        if okDaily and okVwap and okOrb and okFib and okTl and m >= OR_END - 1 and m < ENTRY_END - 1 and ce > stop
+        if okDaily and okVwap and okOrb and okFib and okTl and m >= entryStart - 1 and m < ENTRY_END - 1 and ce > stop
             risk = ce - stop
             t1 = ce + targetR * risk
             float runner = na
