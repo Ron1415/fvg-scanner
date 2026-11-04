@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import config as C
 import engine as E
-from simulate import simulate
+from simulate import confirm_entry, simulate
 
 NY = ZoneInfo("America/New_York")
 
@@ -22,6 +22,8 @@ COLUMNS = [
 VARIANTS = [(e, b) for e in C.TESTS["entries"] for b in C.TESTS["stop_buffers"]]
 LADDERS = C.TESTS.get("ladders", {})
 COLUMNS.insert(COLUMNS.index("extreme"), "ote_62")
+# v3 tests (Nov 3): VWAP side, opening relative volume ("in play"), FVG size, confirmation entry, runner
+COLUMNS += ["vwap", "vwap_ok", "open_rvol", "gap_atr", "trig_confirm", "r_confirm", "confirm_tf", "r_runner"]
 for _e, _b in VARIANTS:
     COLUMNS += [f"trig_{_e}_{_b}", f"r_{_e}_{_b}"]
 for _l in LADDERS:
@@ -49,6 +51,9 @@ def snapshot(s: dict, source: str, freeze_ts: float, suggested: bool, rank, cfg:
         "extreme": r3(s["extreme"]),
         "atr": r3(s["atr"]), "snap_min": s["snap_min"], "base_qualified": s.get("base_qualified", s["qualified"]),
         **{f"g_{k}": s.get("guards", {}).get(k, "") for k in ("bias", "sweep", "rr", "risk", "time", "etf")}, "freeze_ts": int(freeze_ts), "evaluated": False,
+        "vwap": r3(s.get("vwap")), "open_rvol": r3(s.get("open_rvol")),
+        "vwap_ok": None if s.get("vwap") is None else (s["price"] > s["vwap"] if s["side"] == "LONG" else s["price"] < s["vwap"]),
+        "gap_atr": r3((s["fvg_hi"] - s["fvg_lo"]) / s["atr"]) if s.get("atr") else None,
     }
 
 
@@ -66,8 +71,11 @@ def variant_levels(row: dict, entry_kind: str, buf: float) -> dict:
     return {"side": row["side"], "entry": entry, "stop": stop, "t1": row["t1"], "t2": row["t2"], "snap_min": row["snap_min"]}
 
 
-def evaluate(row: dict, bars_after: list, sim: dict = C.SIM) -> dict:
+def evaluate(row: dict, bars_after: list, sim: dict = C.SIM, fine_after: list | None = None) -> dict:
+    """fine_after: 1-minute bars after the snapshot (if available) for the confirmation entry."""
     sim = {**sim, **C.SIDE_MGMT.get(row["side"], {})}   # shorts: closer management
+    if E.is_future(row["ticker"]):   # futures: tick + commission instead of a percentage of price
+        sim["cost_abs_per_side"] = C.FUTURES_TICK.get(row["ticker"], 0) + C.FUTURES_COMMISSION / E.mult_of(row["ticker"])
     o = simulate({k: row[k] for k in ("side", "entry", "stop", "t1", "t2", "snap_min")}, bars_after, sim)
     row.update(evaluated=True, outcome=o["outcome"], triggered=o["triggered"], trigger_time=_clock(row, o["trigger_min"]),
                fill=r3(o["fill"]), exit_time=_clock(row, o["exit_min"]), r_plan=r3(o["r_plan"]), r_plan_net=r3(o["r_plan_net"]),
@@ -82,6 +90,22 @@ def evaluate(row: dict, bars_after: list, sim: dict = C.SIM) -> dict:
         row[f"trig_{e}_{b}"], row[f"r_{e}_{b}"] = v["triggered"], r3(v["r_plan_net"])
     for name, legs in LADDERS.items():
         row[f"trig_{name}"], row[f"r_{name}"], row[f"filled_{name}"] = ladder(row, legs, bars_after, sim)
+    # runner: half at T1, the rest held to the close with a breakeven stop (longs; shorts exit fully at T1)
+    rn = simulate({k: row[k] for k in ("side", "entry", "stop", "t1", "t2", "snap_min")}, bars_after, {**sim, "runner_to_close": True})
+    row["r_runner"] = r3(rn["r_plan_net"])
+    # confirmation entry on the finest bars available
+    series, tf = (fine_after, "1m") if fine_after else (bars_after, "5m")
+    long = row["side"] == "LONG"
+    cf = confirm_entry({"side": row["side"], "zone": row["fvg_hi"] if long else row["fvg_lo"], "stop": row["stop"],
+                        "t1": row["t1"], "snap_min": row["snap_min"]}, series, sim)
+    row["confirm_tf"] = tf
+    if cf is None:
+        row["trig_confirm"], row["r_confirm"] = False, None
+    else:
+        i, px = cf
+        v = simulate({"side": row["side"], "entry": px, "stop": row["stop"], "t1": row["t1"], "t2": row["t2"],
+                      "snap_min": series[i].min, "market": True}, series[i + 1:], sim)
+        row["trig_confirm"], row["r_confirm"] = v["triggered"], r3(v["r_plan_net"])
     return row
 
 
@@ -122,20 +146,25 @@ def prepare(s: dict, ticker: str, session: str, price: float, bias: str, now_min
 
 
 def replay_session(ticker: str, rth: list, lv: dict, bias: str, today: str, source: str, cfg: dict,
-                   sim: dict = C.SIM, name: str = "NY", start_min: int = C.RTH_OPEN) -> list[dict]:
+                   sim: dict = C.SIM, name: str = "NY", start_min: int = C.RTH_OPEN,
+                   open_rvol: float | None = None, fine: list | None = None) -> list[dict]:
     """Walks one session's bars every SIM["replay_step"] minutes (from 30 minutes after the open
     to the entry cutoff), freezes each setup as the live scanner would have, and backtests it.
     Overnight futures sessions use a shifted clock in which their open maps to 9:30."""
     snaps, k = {}, 0
+    pv = vv = 0.0   # running session VWAP of the closed bars
     for step in range(C.OR_END, sim["entry_cutoff"] + 1, sim["replay_step"]):
         while k < len(rth) and rth[k].min < step:
+            b = rth[k]
+            pv += (b.h + b.l + b.c) / 3 * (b.v or 1)
+            vv += (b.v or 1)
             k += 1
         if k < 6:
             continue
         closed = rth[:k]
         price = closed[-1].c
         for s in E.find_setups(closed, lv):
-            s["session_name"] = name
+            s["session_name"], s["vwap"], s["open_rvol"] = name, (pv / vv if vv else None), open_rvol
             prepare(s, ticker, today, price, bias, step, cfg)
             if name != "NY":
                 s["key"] = f"{today}|{ticker}|{s['side']}|{name}{E.hhmm(s['sweep_min'])}"
@@ -151,14 +180,15 @@ def replay_session(ticker: str, rth: list, lv: dict, bias: str, today: str, sour
     for row in snaps.values():
         row["session_name"], row["_start_min"] = name, start_min
         row["snap_time"] = _clock(row, row["snap_min"])
-        evaluate(row, [b for b in rth if b.min >= row["snap_min"]], sim)
+        evaluate(row, [b for b in rth if b.min >= row["snap_min"]], sim,
+                 [b for b in fine if b.min >= row["snap_min"]] if fine else None)
         row.pop("_start_min")
         out.append(row)
     return out
 
 
 def replay_ticker(ticker: str, bars: list, closes_by_date: list, source: str, cfg: dict,
-                  only_dates: set | None = None) -> list[dict]:
+                  only_dates: set | None = None, fine: list | None = None) -> list[dict]:
     """New York session (9:30-4:00 ET) for every symbol; for futures, also the overnight
     Asia and London sessions when SESSIONS_24H is on. bars: all intraday bars incl. extended
     hours; closes_by_date: [(date, close)] daily."""
@@ -167,16 +197,23 @@ def replay_ticker(ticker: str, bars: list, closes_by_date: list, source: str, cf
     by_date = {}
     for b in bars:
         by_date.setdefault(b.date, []).append(b)
+    fine_by = {}
+    for b in fine or []:
+        if E.is_rth(b):
+            fine_by.setdefault(b.date, []).append(b)
+    first_vol = {d: next((b.v for b in by_date[d] if b.min == C.RTH_OPEN), None) for d in dates}
     out = []
     for di in range(1, len(dates)):
         today, prev = dates[di], dates[di - 1]
         if only_dates and today not in only_dates:
             continue
+        past = [first_vol[d] for d in dates[max(0, di - 14):di] if first_vol.get(d)]
+        orv = first_vol[today] / (sum(past) / len(past)) if past and first_vol.get(today) else None
         window = [b for d in sorted(by_date) if prev <= d <= today for b in by_date[d]]
         lv = E.levels_for(window, today, prev, fut)
         rth = [b for b in by_date[today] if E.is_rth(b)]
         bias = E.htf_bias([c for d, c in closes_by_date if d < today])
-        out += replay_session(ticker, rth, lv, bias, today, source, cfg)
+        out += replay_session(ticker, rth, lv, bias, today, source, cfg, open_rvol=orv, fine=fine_by.get(today))
         if fut and C.SESSIONS_24H:
             out += replay_overnight(ticker, window, today, prev, bias, source, cfg)
     return out

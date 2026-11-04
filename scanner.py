@@ -171,9 +171,10 @@ def end_of_day(force: bool = False) -> None:
     # 2. full-session replay of today for every symbol (training mode)
     if C.TRAINING_MODE:
         bars_by = D.yahoo_intraday(u["tickers"], "5d", "5m")
+        fine_by = D.yahoo_intraday([t for t in u["tickers"] if not E.is_future(t)], "5d", "1m") if C.TESTS.get("confirm_1m") else {}
         rows = []
         for t, bars in bars_by.items():
-            rows += replay_ticker(t, bars, [tuple(x) for x in u["closes"].get(t, [])], "Replay", cfg, {today})
+            rows += replay_ticker(t, bars, [tuple(x) for x in u["closes"].get(t, [])], "Replay", cfg, {today}, fine_by.get(t))
         L.append_rows(L.month_file("replay", today), rows)
         log.info("Replay %s: %d setups from %d symbols", today, len(rows), len(bars_by))
     changes = L.autotune() if now.weekday() == 4 else []
@@ -184,8 +185,14 @@ def end_of_day(force: bool = False) -> None:
 
 # ----------------------------------------------------------------- backtest
 def _bt_worker(args):
-    t, bars, closes, cfg, dates = args
-    return replay_ticker(t, bars, closes, "Backtest", cfg, dates)
+    t, bars, closes, cfg, dates, fine_range = args
+    fine = None
+    if fine_range:   # 1-minute bars for the confirmation-entry test (stocks/ETFs with Alpaca)
+        try:
+            fine = D.alpaca_bars(t, fine_range[0], fine_range[1], "1Min", rth_only=True)
+        except Exception as e:   # the test is optional: never fail the backtest over it
+            log.warning("1-minute bars unavailable for %s: %s", t, e)
+    return replay_ticker(t, bars, closes, "Backtest", cfg, dates, fine)
 
 
 def backtest(days: int) -> None:
@@ -201,15 +208,30 @@ def backtest(days: int) -> None:
     use_alpaca = D.alpaca_enabled()
     yahoo_set = [t for t in u["tickers"] if E.is_future(t) or not use_alpaca]
     y60 = D.yahoo_intraday(yahoo_set, "60d", "5m") if yahoo_set else {}
-    jobs, coverage = [], {}
+    jobs, coverage, fallback = [], {}, []
     for t in u["tickers"]:
         bars = y60.get(t, []) if t in y60 or t in yahoo_set else D.alpaca_5m(t, start, end)
+        if not bars and t not in yahoo_set:
+            fallback.append(t)
+            continue
         if not bars:
             continue
         have = sorted({b.date for b in bars})
         coverage[t] = [have[0], have[-1]]
-        jobs.append((t, bars, closes.get(t, []), cfg, set(sessions)))
+        jobs.append((t, bars, closes.get(t, []), cfg, set(sessions), (start, end) if C.TESTS.get("confirm_1m") and use_alpaca and not E.is_future(t) else None))
+    if fallback:   # Alpaca returned nothing: use Yahoo's ~60 days rather than dropping the symbol
+        log.warning("Alpaca returned no bars for %d symbols; using Yahoo for them. First error: %s",
+                    len(fallback), D.ALPACA_ERRORS[:1])
+        yb = D.yahoo_intraday(fallback, "60d", "5m")
+    for t in fallback:
+        bars = yb.get(t, [])
+        if not bars:
+            continue
+        have = sorted({b.date for b in bars})
+        coverage[t] = [have[0], have[-1]]
+        jobs.append((t, bars, closes.get(t, []), cfg, set(sessions), None))
     rows = []
+    os.environ["ALPACA_SLEEP"] = str(0.35 * (os.cpu_count() or 2))   # workers share the 200/minute limit
     with ProcessPoolExecutor(max_workers=os.cpu_count() or 2) as ex:
         for r in ex.map(_bt_worker, jobs, chunksize=1):
             rows += r
@@ -221,7 +243,10 @@ def backtest(days: int) -> None:
     meta = {"run_at": now_ny().strftime("%Y-%m-%d %H:%M ET"), "days_requested": days,
             "sessions": [sessions[0], sessions[-1]], "symbols": len(jobs), "setups": len(df),
             "stock_source": "Alpaca (SIP)" if use_alpaca else "Yahoo (about 60 days only)",
-            "futures_source": "Yahoo (about 60 days only)", "coverage": coverage, "config_version": cfg["version"]}
+            "futures_source": "Yahoo (about 60 days only)", "coverage": coverage, "config_version": cfg["version"],
+            "alpaca_fallback_to_yahoo": fallback, "alpaca_errors": D.ALPACA_ERRORS[:5]}
+    if use_alpaca and len(fallback) > len(jobs) / 2:
+        meta["stock_source"] = "Yahoo (Alpaca failed; see alpaca_errors)"
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
     log.info("Backtest: %d setups, %d symbols, %s to %s (%s)", len(df), len(jobs), sessions[0], sessions[-1], meta["stock_source"])
     L.review("Backtest")

@@ -97,19 +97,32 @@ def yahoo_daily(tickers: list[str], period="1y") -> dict[str, pd.DataFrame]:
 
 
 # ----------------------------------------------------------------- Alpaca (6+ months of 5-minute bars)
+ALPACA_ERRORS: list[str] = []
+
+
 def alpaca_enabled() -> bool:
     return bool(os.environ.get("ALPACA_KEY_ID", "").strip() and os.environ.get("ALPACA_SECRET_KEY", "").strip())
 
 
 def alpaca_5m(ticker: str, start: dt.date, end: dt.date) -> list:
     """5-minute bars incl. extended hours from Alpaca's market-data API (split-adjusted)."""
+    return alpaca_bars(ticker, start, end, "5Min")
+
+
+def alpaca_bars(ticker: str, start: dt.date, end: dt.date, timeframe: str = "5Min", rth_only: bool = False) -> list:
+    """Bars from Alpaca's market-data API (split-adjusted). rth_only keeps 9:30-4:00 ET only
+    (used for 1-minute bars, to keep memory small)."""
     import requests
-    cache = CACHE / f"alpaca_{ticker}_{start}_{end}.pkl.gz"
+    cache = CACHE / f"alpaca_{ticker}_{timeframe}_{start}_{end}.pkl.gz"
     if cache.exists():
         return pickle.loads(gzip.decompress(cache.read_bytes()))
     # .strip(): a key pasted into GitHub secrets with a trailing Enter breaks the request header
     hdr = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY_ID"].strip(), "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET_KEY"].strip()}
-    params = {"timeframe": "5Min", "start": f"{start}T00:00:00Z", "end": f"{end}T23:59:00Z", "limit": 10000,
+    # Alpaca's free plan refuses SIP data from the latest 15 minutes, so the request ends at
+    # least 20 minutes before now (the end of the backtest day is otherwise in the future).
+    end_dt = min(dt.datetime(end.year, end.month, end.day, 23, 59, tzinfo=dt.timezone.utc),
+                 dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20))
+    params = {"timeframe": timeframe, "start": f"{start}T00:00:00Z", "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), "limit": 10000,
               "adjustment": "split", "feed": C.ALPACA_FEED, "sort": "asc"}
     rows, token = [], None
     url = f"https://data.alpaca.markets/v2/stocks/{ticker}/bars"
@@ -123,16 +136,19 @@ def alpaca_5m(ticker: str, start: dt.date, end: dt.date) -> list:
             break
         if r.status_code != 200:
             log.warning("Alpaca %s: HTTP %s %s", ticker, r.status_code, r.text[:200])
+            ALPACA_ERRORS.append(f"{ticker}: HTTP {r.status_code} {r.text[:120]}")
             return []
         j = r.json()
         rows += j.get("bars") or []
         token = j.get("next_page_token")
         if not token:
             break
-        time.sleep(0.35)          # stay under 200 requests per minute
+        time.sleep(float(os.environ.get("ALPACA_SLEEP", "0.35")))   # stay under 200 requests per minute
     out = []
     for b in rows:
         t = pd.Timestamp(b["t"]).tz_convert(NY)
+        if rth_only and not (C.RTH_OPEN <= t.hour * 60 + t.minute < C.RTH_CLOSE):
+            continue
         out.append(Bar(int(t.timestamp()), t.strftime("%Y-%m-%d"), t.hour * 60 + t.minute,
                        float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"]), float(b.get("v") or 0)))
     CACHE.mkdir(exist_ok=True)

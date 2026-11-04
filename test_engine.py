@@ -131,7 +131,24 @@ def test_short_rules():
     check("longs are not held to the short guardrails", l["qualified"])
 
 
+def test_confirmation_and_runner():
+    from simulate import confirm_entry
+    sn = {"side": "LONG", "zone": 100.5, "stop": 99, "t1": 103, "snap_min": 620}
+    # touches the gap at bar 1, pushes lower, then bar 4 closes above the prior 3 highs (101.0) -> enter at 101.05
+    b = bars([[101.2, 101.3, 100.9, 101.0], [101.0, 101.0, 100.4, 100.5], [100.5, 100.6, 100.1, 100.2],
+              [100.2, 100.4, 100.0, 100.3], [100.3, 101.2, 100.2, 101.05]])
+    check("confirmation entry waits for a close above the prior 3 bars", confirm_entry(sn, b, SIM) == (4, 101.05))
+    b2 = bars([[101.2, 101.3, 100.4, 100.5], [100.5, 100.6, 98.9, 99.2], [99.2, 101.5, 99.1, 101.4]])
+    check("no confirmation entry if the stop trades first", confirm_entry(sn, b2, SIM) is None)
+    sl = {"side": "LONG", "entry": 100, "stop": 99, "t1": 102, "t2": 103, "snap_min": 620}
+    b3 = bars([[100.5, 100.6, 99.9, 100.1], [100.1, 102.1, 100, 102], [102, 103.5, 101.8, 103.4]], start=640) + \
+        [Bar(0, "2026-10-29", 955, 103.4, 104.6, 103.3, 104.5, 0)]
+    o = simulate(sl, b3, {**SIM, "runner_to_close": True})
+    check("runner holds past T2 until the close", o["outcome"] == "T1 then EOD" and o["r_plan"] > 2.5)
+
+
 if __name__ == "__main__":
+    test_confirmation_and_runner()
     test_short_rules()
     test_overnight_futures()
     test_ladder()

@@ -261,6 +261,34 @@ def review(kind="Manual", changes=None) -> dict:
         rows.append([lab, len(v), _f(float(v.mean()) if len(v) else None), _f(float((v > 0).mean()) if len(v) else None, True)])
     table("8. Trade management (systematic, qualified, triggered)", ["Method", "Trades", "Avg R", "Win rate"], rows)
 
+    # v3 candidate tests (Nov 3): filters x methods, New York session
+    v3c = C.TESTS.get("v3")
+    if v3c and "gap_atr" in sysq:
+        x = sysq[sysq["session_name"] == "NY"].copy()
+        for c in ("gap_atr", "open_rvol", "r_runner", "r_confirm", "r_t2"):
+            x[c] = pd.to_numeric(x.get(c), errors="coerce")
+        x["vwap_ok_b"] = as_bool(x["vwap_ok"]) if "vwap_ok" in x else False
+        x["trig_confirm_b"] = as_bool(x["trig_confirm"]) if "trig_confirm" in x else False
+        x["t2_net"] = x["r_t2"] - (x["r_plan"] - x["r_plan_net"])
+        w0, w1 = v3c["window"]
+        v3 = (x["snap_min"] >= w0) & (x["snap_min"] < w1) & (x["risk_pct"] >= v3c["min_risk_pct"]) & (x["gap_atr"] >= v3c["min_gap_atr"])
+        inplay = x["open_rvol"] >= v3c["in_play_rvol"]
+        filt = {"All (New York)": x.index == x.index, f"v3: {E.hm(w0)}-{E.hm(w1)} + risk {v3c['min_risk_pct']}%+ + FVG {v3c['min_gap_atr']}+ ATR": v3,
+                "v3 + longs": v3 & (x["side"] == "LONG"), "v3 + VWAP side": v3 & x["vwap_ok_b"],
+                f"v3 + in play (open volume {v3c['in_play_rvol']}x+)": v3 & inplay, "v3 + longs + VWAP side": v3 & (x["side"] == "LONG") & x["vwap_ok_b"],
+                "VWAP side only": x["vwap_ok_b"], "In play only": inplay}
+        methods = [("Current plan", "r_plan_net", "triggered"), ("Runner to the close", "r_runner", "triggered"),
+                   ("Full position to T2", "t2_net", "triggered"), ("Confirmation entry", "r_confirm", "trig_confirm_b")]
+        rows = []
+        for fname, m in filt.items():
+            for mname, rc, tc in methods:
+                rows.append(mrow(f"{fname} · {mname}", metrics(x[m], rc, tc)))
+        tf = x["confirm_tf"].value_counts().to_dict() if "confirm_tf" in x else {}
+        table("10. v3 candidate tests (New York session, qualified, net of costs)", HEAD, rows,
+              "Confirmation entry = wait for price to reach the FVG, then enter on the first bar that closes beyond the "
+              f"prior 3 bars (bars used: {tf}). Runner = half at T1, rest to the close with a breakeven stop. "
+              "1st/2nd half columns are the out-of-sample check.")
+
     ch = changes or []
     table("9. Automatic changes in this run", ["Key", "Old", "New", "Evidence"],
           [[c["key"], c["old"], c["new"], c["why"]] for c in ch] or [["None", "", "", ""]])

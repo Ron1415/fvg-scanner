@@ -30,6 +30,11 @@ STOCK_CANDIDATES = [
     "ACHR", "JOBY", "ASTS", "RKLB", "SOUN", "VRT", "ON", "TXN", "ADI", "WDC", "STX",
 ]
 # Yahoo continuous front-month futures; mult = dollars per 1.00 of price
+# Futures costs per side, in price points: 1 tick of slippage + about $2.50 commission per contract.
+FUTURES_TICK = {"ES=F": 0.25, "NQ=F": 0.25, "YM=F": 1.0, "RTY=F": 0.1, "CL=F": 0.01, "NG=F": 0.001, "GC=F": 0.1,
+                "SI=F": 0.005, "HG=F": 0.0005, "ZN=F": 1 / 64, "ZB=F": 1 / 32, "ZF=F": 1 / 128, "6E=F": 0.00005,
+                "6J=F": 0.0000005, "ZC=F": 0.25, "ZS=F": 0.25}
+FUTURES_COMMISSION = 2.50
 FUTURES = {
     "ES=F": ("E-mini S&P 500", 50), "NQ=F": ("E-mini Nasdaq-100", 20), "YM=F": ("E-mini Dow", 5),
     "RTY=F": ("E-mini Russell 2000", 50), "CL=F": ("Crude Oil", 1000), "NG=F": ("Natural Gas", 10000),
@@ -74,6 +79,12 @@ TESTS = {
     # Ron's idea); ote_62 = first touch of the OTE zone (62% retracement)
     "entries": ["ote_mid", "fvg_edge", "fvg_ce", "blend", "ote_62"],
     "stop_buffers": [0.1, 0.3],                        # ATR beyond the sweep extreme
+    # v3 tests (Nov 3): confirmation entry on 1-minute bars (Alpaca in the backtest, Yahoo for
+    # the daily replay; futures fall back to 5-minute bars). Recorded as r_confirm / r_runner.
+    "confirm_1m": True,
+    # Candidate filters for the review (not live rules): midday window, minimum risk, minimum FVG size,
+    # VWAP side, "in play" opening relative volume.
+    "v3": {"window": (690, 870), "min_risk_pct": 0.3, "min_gap_atr": 0.5, "in_play_rvol": 1.5},
     # Scaled entries: several limit orders, one shared stop and targets. Weights = share of the
     # full position at each price (shallowest first). Results are in R of the full planned risk.
     "ladders": {
