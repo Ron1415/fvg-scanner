@@ -1,5 +1,6 @@
 //@version=6
-// FVG 1-Minute Long Model, version 2 (Ron, Nov 4, 2026): stocks and SPY, fills from 10:30, stop variants. Same rules as fvg1m.py in the fvg-scanner repository.
+// FVG 1-Minute Long Model, version 3 (v3 exits: no initial stop; exit on 2 closes below the swing low;
+// breakeven stop after 2 closes above the recent high). Version 2 (Ron, Nov 4, 2026): stocks and SPY, fills from 10:30, stop variants. Same rules as fvg1m.py in the fvg-scanner repository.
 // Use on a 1-minute chart of a US stock or ETF with regular trading hours only (no extended hours).
 //   1. Up-trend bias: daily trend up, price above VWAP, 9:30-9:45 opening range broken upward.
 //   2. Break of structure: first close above the last lower high (swing high lower than the one before).
@@ -27,6 +28,9 @@ fibLo      = input.float(0.45, "Retracement zone from", step = 0.01, group = "St
 fibHi      = input.float(0.70, "Retracement zone to", step = 0.01, group = "Structure")
 tlPad      = input.float(0.25, "Trendline may sit outside the FVG by (x ATR)", step = 0.05, group = "Structure")
 tlTol      = input.float(0.10, "Closes may poke through the line by (x ATR)", step = 0.05, group = "Structure")
+exitMode   = input.string("Close-confirmed (v3)", "Exit method", options = ["Close-confirmed (v3)", "Stop order (v2)"], group = "Risk",
+     tooltip = "v3: no stop at the start; exit on the 2nd close below the swing low; breakeven stop after 2 closes above the recent high")
+confirmN   = input.int(2, "Closes needed to confirm (v3)", minval = 1, group = "Risk")
 stopMode   = input.string("Below the FVG", "Stop placement", options = ["Below the FVG", "Below the swing low"], group = "Risk")
 stopAtr    = input.float(0.10, "Stop below the FVG / swing low by (x ATR)", step = 0.05, group = "Risk")
 minRiskPct = input.float(0.20, "Minimum stop distance (% of price)", step = 0.05, group = "Risk")
@@ -88,6 +92,11 @@ var float tT1 = na
 var float tRunner = na
 var float posInit = 0.0
 var float planHigh = na
+var float tSwingLow = na
+var int belowCnt = 0
+var int aboveCnt = 0
+var bool beSet = false
+v3 = exitMode == "Close-confirmed (v3)"
 
 if newDay
     dayStart := bar_index
@@ -133,7 +142,23 @@ if strategy.position_size > 0 and strategy.position_size[1] == 0
     tT1 := tEntry + targetR * (tEntry - tStop)
     tradesToday += 1
     hasSetup := false
-if strategy.position_size > 0
+    belowCnt := 0
+    aboveCnt := 0
+    beSet := false
+if strategy.position_size > 0 and v3
+    t1Hit = strategy.position_size < posInit
+    belowCnt := close < tSwingLow ? belowCnt + 1 : 0
+    aboveCnt := close > tRecentHigh ? aboveCnt + 1 : 0
+    if belowCnt >= confirmN
+        strategy.close("L", comment = "Lower low")
+    else
+        if aboveCnt >= confirmN or t1Hit
+            beSet := true
+        float st = beSet ? tEntry : na
+        if not t1Hit
+            strategy.exit("T1", "L", qty_percent = partialPct, limit = tT1, stop = st, comment_profit = "4R", comment_loss = "BE")
+        strategy.exit("Run", "L", limit = useMagnets ? tRunner : na, stop = st, comment_profit = "Magnet", comment_loss = "BE")
+if strategy.position_size > 0 and not v3
     t1Hit = strategy.position_size < posInit
     if close > tRecentHigh or t1Hit
         tStop := math.max(tStop, tEntry)
@@ -254,7 +279,7 @@ if hasSetup and canTrade
                         ret := r
     if not na(ce)
         base = stopMode == "Below the swing low" ? l0Low : gLo
-        stop = math.min(base - stopAtr * atr1, ce * (1 - minRiskPct / 100))
+        stop = v3 ? math.min(l0Low, ce * (1 - minRiskPct / 100)) : math.min(base - stopAtr * atr1, ce * (1 - minRiskPct / 100))
         pad = tlPad * atr1
         line1 = hasTl and tlBroken ? tlAPx + tlSl * (bar_index + 1 - tlA) : na
         okDaily = not useDaily or dailyUp
@@ -273,9 +298,11 @@ if hasSetup and canTrade
                         runner := v
             qty = math.max(1, math.floor(math.min(strategy.equity * riskPct / 100 / risk, strategy.equity * maxPosPct / 100 / ce)))
             strategy.entry("L", strategy.long, qty = qty, limit = ce, comment = "FVG mid")
-            strategy.exit("T1", "L", qty_percent = partialPct, limit = t1, stop = stop, comment_profit = "4R", comment_loss = "Stop")
-            strategy.exit("Run", "L", limit = useMagnets ? runner : na, stop = stop, comment_profit = "Magnet", comment_loss = "BE/Stop")
+            float orderStop = v3 ? na : stop   // v3: no stop order at the start
+            strategy.exit("T1", "L", qty_percent = partialPct, limit = t1, stop = orderStop, comment_profit = "4R", comment_loss = "Stop")
+            strategy.exit("Run", "L", limit = useMagnets ? runner : na, stop = orderStop, comment_profit = "Magnet", comment_loss = "BE/Stop")
             tStop := stop
+            tSwingLow := l0Low
             tT1 := t1
             tRunner := runner
             tRecentHigh := hi
@@ -290,7 +317,7 @@ if flat and not planned
 // ---------------------------------------------------------------- display
 plot(vwapV, "VWAP", color = color.new(color.purple, 0))
 plot(m >= OPEN_M and m < RTH_END ? orh : na, "Opening-range high", color = color.new(color.orange, 30), style = plot.style_linebr)
-plot(strategy.position_size > 0 ? tStop : na, "Stop", color = color.new(color.red, 0), style = plot.style_linebr)
+plot(strategy.position_size > 0 ? (v3 ? tSwingLow : tStop) : na, "Stop or exit level", color = color.new(color.red, 0), style = plot.style_linebr)
 plot(strategy.position_size > 0 ? tT1 : na, "4R target", color = color.new(color.green, 0), style = plot.style_linebr)
 plot(strategy.position_size > 0 and useMagnets ? tRunner : na, "Runner magnet", color = color.new(color.teal, 0), style = plot.style_linebr)
 bgcolor(useDaily and not dailyUp ? color.new(color.gray, 92) : na, title = "Daily trend not up")

@@ -69,6 +69,8 @@ A separate, simpler model on 1-minute bars: `fvg1m.py`, settings in `config_1m.p
 
 **Version 2 (Nov 4, 2026):** stocks plus SPY only; fills from 10:30; a limit order fills only if price trades a cent through it; a realistic cost column (limit orders free, $0.01/share on stops and the close); stop variants (below the FVG or below the swing low) with 4R and 3R targets. The review chooses the variant on May-August and confirms it on September onward.
 
+**Version 3 exits (Nov 4, 2026):** no stop loss at the start. The trade is closed at the 2nd consecutive 1-minute close below the recent swing low. Once 2 consecutive closes are above the recent high, a breakeven stop is set. 1R = entry minus the swing low (at least 0.20% of price); half is sold at 4R. The review compares this with the version 2 stop order.
+
 **Backtest:** run the workflow with mode `fvg1m` and 125 days (needs the Alpaca keys for 1-minute history). Results go to `review_1m.md` and `backtest_1m/trades.csv.gz`. Section 1 of the review switches each rule off in turn, so it shows what every rule adds.
 
 ## Trendline retest confluence (added November 4, 2026)

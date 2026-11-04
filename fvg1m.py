@@ -133,12 +133,49 @@ def manage(t: dict, bars: list, mode: str) -> tuple[float, str, int]:
     return (r + (1 - done) * R(last.c) if last else 0.0), "End of data", (last.min if last else None), 1 - done
 
 
+def manage_close(t: dict, bars: list, mode: str) -> tuple[float, str, int, float]:
+    """Version 3 exits (Ron, Nov 4, 2026): NO stop loss at the start.
+    - Exit everything at the close of the 2nd consecutive 1-minute close below the recent (swing) low.
+    - Once 2 consecutive closes are above the recent high, a stop is set at breakeven (from the next bar).
+    - Half at the target (4R of entry minus the swing low, at least MIN_RISK_PCT); the stop also goes to
+      breakeven once the target is hit; the rest rides to the 15-minute magnet or the close.
+    bars start WITH the fill bar (its close counts; targets and stops only from the next bar).
+    Returns (R before costs, exit reason, exit minute, share of the position closed at market)."""
+    e, risk, t1, low, high = t["entry"], t["entry"] - t["stop"], t["t1"], t["swing_low"], t["recent_high"]
+    runner = t["magnet"] if mode == "plan" else None
+    part = 1.0 if mode == "full4r" else K.PARTIAL_AT_TARGET
+    stop, done, r, hit, below, above = None, 0.0, 0.0, False, 0, 0
+    R = lambda px: (px - e) / risk
+    for n, b in enumerate(bars):
+        if n and b.min >= K.EOD_EXIT:
+            return r + (1 - done) * R(b.c), ("Target then close" if hit else "Close"), b.min, 1 - done
+        if n:
+            if stop is not None and b.l <= stop:
+                px = min(stop, b.o)              # a gap below the stop fills at the open
+                return r + (1 - done) * R(px), ("Target then breakeven" if hit else "Breakeven"), b.min, 1 - done
+            if not hit and b.h >= t1:
+                hit, r, done = True, part * R(t1), part
+                if done >= 1:
+                    return r, "Target", b.min, 0.0
+            if hit and runner and b.h >= runner:
+                return r + (1 - done) * R(runner), "Target then magnet", b.min, 0.0
+        below = below + 1 if b.c < low else 0
+        if below >= K.CONFIRM_CLOSES:
+            return r + (1 - done) * R(b.c), ("Target then lower low" if hit else "Lower low confirmed"), b.min, 1 - done
+        above = above + 1 if b.c > high else 0
+        if above >= K.CONFIRM_CLOSES or hit:
+            stop = e if stop is None else max(stop, e)
+    last = bars[-1] if bars else None
+    return (r + (1 - done) * R(last.c) if last else 0.0), "End of data", (last.min if last else None), 1 - done
+
+
 # ----------------------------------------------------------------- the walk
 def settings(over: dict | None = None) -> dict:
     """Rules and parameters for one run: config_1m defaults with a RUNS entry's overrides."""
     over = over or {}
     return {"rules": {r: over.get(r, on) for r, on in K.RULES.items()},
-            "stop": over.get("stop", K.STOP_MODE), "target_r": over.get("target_r", K.TARGET_R)}
+            "stop": over.get("stop", K.STOP_MODE), "target_r": over.get("target_r", K.TARGET_R),
+            "exit": over.get("exit", K.EXIT_MODE)}
 
 
 def run_day(day: list, hist: list, b15: list, up: bool, cfg: dict | None = None) -> list[dict]:
@@ -180,7 +217,9 @@ def run_day(day: list, hist: list, b15: list, up: bool, cfg: dict | None = None)
                     allm = magnets(b15, hist, b.ts, fill)
                     t["magnet"] = mg[0] if mg else None
                     t["magnet_before_t1"] = bool(allm and allm[0] < t["t1"])
-                    if L[i] <= t["stop"]:             # the fill bar itself can only stop out
+                    if cfg["exit"] == "close":         # v3: no stop; close-confirmed lower low exits
+                        res = {m: manage_close(t, day[i:], m) for m in ("plan", "full4r", "eod")}
+                    elif L[i] <= t["stop"]:           # the fill bar itself can only stop out
                         res = {m: (-1.0, "Stop", b.min, 1.0) for m in ("plan", "full4r", "eod")}
                     else:
                         res = {m: manage(t, day[i + 1:], m) for m in ("plan", "full4r", "eod")}
@@ -238,6 +277,8 @@ def run_day(day: list, hist: list, b15: list, up: bool, cfg: dict | None = None)
         gap_lo, gap_hi = H[j - 1], L[j + 1]
         base = setup["low"] if cfg["stop"] == "swing" else gap_lo   # below the swing low, or below the FVG
         stop = min(base - K.STOP_ATR * atr[i], ce * (1 - K.MIN_RISK_PCT / 100))
+        if cfg["exit"] == "close":   # v3: no stop order; 1R = entry minus the swing low (at least MIN_RISK_PCT)
+            stop = min(setup["low"], ce * (1 - K.MIN_RISK_PCT / 100))
         tl, line = setup["tl"], None
         if tl:
             a, sl, _t = tl
@@ -375,7 +416,7 @@ def review() -> str:
           f"cost ({K.COST_PCT_PER_SIDE}% per side). Realistic cost = limit orders free, ${K.SLIP_PER_SHARE}/share on stops "
           f"and the close. Fills 10:30-15:00; a limit fills only if price trades ${K.FILL_THROUGH} through it.\n\n"]
     # 1. variants; pick the best on the design period, report its confirmation
-    md.append("## 1. Stop and target variants (half at the target, rest to the 15-minute magnet)\n\n")
+    md.append("## 1. Exit and target variants (half at the target, rest to the 15-minute magnet)\n\n")
     vs = {v: stats(df[df["run"] == v]) for v in K.VARIANTS}
     md.append(table(list(vs.items())))
     ok = {v: s for v, s in vs.items() if s.get("n1", 0) >= 50 and s.get("d1") is not None}
@@ -389,7 +430,7 @@ def review() -> str:
     else:
         best = K.VARIANTS[0]
         md.append("\nToo few design-period trades (under 50) to choose a variant.\n")
-    md.append("\n## 2. Each rule switched off in turn (FVG stop, 4R)\n\n")
+    md.append("\n## 2. Each rule switched off in turn (core v3: close-confirmed exits, 4R)\n\n")
     md.append(table([(r, stats(df[df["run"] == r])) for r in runs if r not in K.VARIANTS[1:]]))
     core = df[df["run"] == best]
     if len(core):
@@ -413,6 +454,10 @@ def review() -> str:
         md.append(f"\nStandard cost: {core['cost_r'].mean():.2f}R per trade. Realistic cost: {core['cost_real_r'].mean():.2f}R. "
                   f"Trades reaching the target: {core['exit'].str.startswith('Target').mean() * 100:.1f}%. "
                   f"Median risk: {core['risk_pct'].median():.2f}% of price.\n")
+        lo = core.loc[core["r_plan"] < 0, "r_plan"]
+        if len(lo):
+            md.append(f"\nLosing trades: average {lo.mean():.2f}R, worst {lo.min():.2f}R; "
+                      f"{(lo < -1.5).mean() * 100:.1f}% lost more than 1.5R (no stop order until the breakeven stop is set).\n")
         top = core.groupby("ticker")["r_plan"].agg(["count", "mean", "sum"]).sort_values("sum", ascending=False)
         md.append(f"\n## 6. {best} by symbol (top and bottom 8 by total R)\n\n| Symbol | Trades | Avg R | Total R |\n|---|---|---|---|\n")
         for t, r in pd.concat([top.head(8), top.tail(8)]).drop_duplicates().iterrows():

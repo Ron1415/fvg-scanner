@@ -39,6 +39,12 @@ TL_PAD_ATR = 0.25                # trendline may sit up to 0.25 x 1-minute ATR o
 TL_TOL_ATR = 0.10                # closes may poke 0.1 ATR through the line before it is "broken"
 
 # ----------------------------------------------------------------- risk and exits
+# Version 3 exits (Ron, Nov 4, 2026): EXIT_MODE "close" = no stop loss at the start; exit at the close of
+# the 2nd consecutive 1-minute close below the recent (swing) low; set a breakeven stop once 2 consecutive
+# closes are above the recent high. 1R = entry minus the swing low (at least MIN_RISK_PCT).
+# EXIT_MODE "stop" = version 2 (stop order below the FVG from the start).
+EXIT_MODE = "close"
+CONFIRM_CLOSES = 2
 STOP_MODE = "fvg"                # "fvg" = below the FVG; "swing" = below the swing low of the break
 STOP_ATR = 0.10                  # stop = FVG bottom (or swing low) - 0.1 x 1-minute ATR ...
 MIN_RISK_PCT = 0.20              # ... widened to at least 0.20% of price (costs eat tiny stops)
@@ -50,20 +56,19 @@ SLIP_PER_SHARE = 0.01            # realistic cost: limit orders free, $0.01/shar
 FILL_THROUGH = 0.01              # a limit buy fills only if price trades at least $0.01 below it
 
 # ----------------------------------------------------------------- backtest
-VERSION = 2
+VERSION = 3
 SPLIT_DATE = "2026-09-01"        # choose on sessions before this date, confirm on sessions after it
 ALLOW_ETFS = ["SPY"]             # stocks plus these ETFs
 # Each run is the core model with some settings changed. The first four compare stops and targets;
 # the rest switch one rule off (with the core stop and target) to show what every rule adds.
 RUNS = {
-    "FVG stop, 4R (core)": {},
-    "FVG stop, 3R": {"target_r": 3.0},
-    "Swing-low stop, 4R": {"stop": "swing"},
-    "Swing-low stop, 3R": {"stop": "swing", "target_r": 3.0},
+    "Close-confirmed exits, 4R (core v3)": {},
+    "Close-confirmed exits, 3R": {"target_r": 3.0},
+    "Stop below the FVG, 4R (v2)": {"exit": "stop"},
     "without daily trend": {"daily_up": False},
     "without VWAP": {"vwap": False},
     "without opening range": {"orb": False},
     "without Fibonacci": {"fib": False},
     "without trendline": {"trendline": False},
 }
-VARIANTS = ["FVG stop, 4R (core)", "FVG stop, 3R", "Swing-low stop, 4R", "Swing-low stop, 3R"]
+VARIANTS = ["Close-confirmed exits, 4R (core v3)", "Close-confirmed exits, 3R", "Stop below the FVG, 4R (v2)"]
