@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "live = scan now, eod = end-of-day replay + review, backtest = replay past days, review = rebuild the review"
+        description: "live = scan now, eod = end-of-day replay + review, backtest = replay past days, review = rebuild the review, fvg1m = 1-minute model backtest"
         default: "live"
       backtest_days:
         description: "Backtest length in trading days (125 = about 6 months)"
@@ -53,7 +53,8 @@ jobs:
           ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         run: |
-          if [ "$MODE" = "backtest" ]; then python scanner.py --backtest "${BT_DAYS:-125}"
+          if [ "$MODE" = "fvg1m" ]; then python fvg1m.py --backtest "${BT_DAYS:-125}"
+          elif [ "$MODE" = "backtest" ]; then python scanner.py --backtest "${BT_DAYS:-125}"
           elif [ "$MODE" = "eod" ]; then python scanner.py --eod
           elif [ "$MODE" = "review" ]; then python scanner.py --review
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then python scanner.py --live
@@ -64,7 +65,7 @@ jobs:
         run: |
           git config user.name "fvg-bot"
           git config user.email "actions@users.noreply.github.com"
-          for f in site history backtest universe.json review.md review_log.csv tuning.json config_changes.json; do
+          for f in site history backtest backtest_1m review_1m.md universe.json review.md review_log.csv tuning.json config_changes.json; do
             if [ -e "$f" ]; then git add -A "$f"; fi
           done
           git diff --cached --quiet || git commit -m "FVG $(TZ=America/New_York date '+%Y-%m-%d %H:%M ET')"
