@@ -1,71 +1,83 @@
-# 1-minute FVG model review: 2026-11-04 17:54 ET
-Data: Alpaca 1-minute (SIP), 2026-05-07 to 2026-11-03, 96 symbols. Long only. Results in R, net of 0.02% per side.
+# 1-minute FVG model review (version 2): 2026-11-04 18:11 ET
 
-## 1. Each rule switched off in turn (current plan: half at 4R, rest to the 15-minute magnet)
+Data: Alpaca 1-minute (SIP), 2026-05-07 to 2026-11-03, 74 symbols (stocks plus SPY). Long only. Avg R is net of the standard cost (0.02% per side). Realistic cost = limit orders free, $0.01/share on stops and the close. Fills 10:30-15:00; a limit fills only if price trades $0.01 through it.
 
-| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | 1st half avg R | 2nd half avg R |
-|---|---|---|---|---|---|---|---|---|
-| core | 667 | 17.4% | -0.13 | 0.82 | -84.76 | -112.65 | -0.12 | -0.13 |
-| without daily trend | 1645 | 15.8% | -0.25 | 0.66 | -407.82 | -428.44 | -0.19 | -0.30 |
-| without VWAP | 991 | 16.0% | -0.20 | 0.72 | -199.46 | -219.24 | -0.22 | -0.18 |
-| without opening range | 983 | 16.1% | -0.20 | 0.72 | -198.38 | -218.72 | -0.19 | -0.21 |
-| without Fibonacci | 1034 | 14.8% | -0.24 | 0.67 | -245.06 | -251.57 | -0.22 | -0.25 |
-| without trendline | 2383 | 17.7% | -0.18 | 0.75 | -433.67 | -444.38 | -0.14 | -0.22 |
-| structure + FVG only | 20031 | 16.0% | -0.19 | 0.73 | -3900.52 | -3907.44 | -0.17 | -0.22 |
+## 1. Stop and target variants (half at the target, rest to the 15-minute magnet)
 
-## 2. Core model: exit methods
+| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | Design avg R (to Aug) | Confirm avg R (Sep on) | Avg R, realistic cost |
+|---|---|---|---|---|---|---|---|---|---|
+| FVG stop, 4R (core) | 431 | 18.3% | -0.11 | 0.86 | -45.90 | -71.97 | -0.16 (n=315) | 0.03 (n=116) | 0.07 |
+| FVG stop, 3R | 431 | 20.0% | -0.17 | 0.76 | -74.70 | -92.47 | -0.22 (n=315) | -0.05 (n=116) | 0.01 |
+| Swing-low stop, 4R | 431 | 16.5% | -0.15 | 0.78 | -64.07 | -96.58 | -0.22 (n=315) | 0.05 (n=116) | 0.00 |
+| Swing-low stop, 3R | 431 | 19.0% | -0.17 | 0.75 | -72.72 | -99.18 | -0.23 (n=315) | -0.00 (n=116) | -0.02 |
 
-| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | 1st half avg R | 2nd half avg R |
-|---|---|---|---|---|---|---|---|---|
-| Half at 4R, rest to the 15-minute magnet (plan) | 667 | 17.4% | -0.13 | 0.82 | -84.76 | -112.65 | -0.12 | -0.13 |
-| Everything at 4R | 667 | 17.4% | -0.14 | 0.81 | -91.67 | -114.84 | -0.13 | -0.14 |
-| Half at 4R, rest held to the close | 667 | 17.4% | -0.13 | 0.82 | -83.44 | -111.37 | -0.13 | -0.12 |
+**Chosen on May-August: FVG stop, 4R (core)** (-0.16R, n=315). Confirmation from September: 0.03R (n=116). The out-of-sample check FAILS (both periods must be above zero after the standard cost).
 
-## 3. Core model: by entry time, risk size, room to the first magnet
+## 2. Each rule switched off in turn (FVG stop, 4R)
 
-| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | 1st half avg R | 2nd half avg R |
-|---|---|---|---|---|---|---|---|---|
-| Filled 9:45-10:30 | 68 | 14.7% | -0.40 | 0.53 | -27.35 | -35.40 | -0.24 | -0.57 |
-| Filled 10:30-12:00 | 199 | 19.1% | -0.05 | 0.93 | -9.60 | -41.77 | 0.18 | -0.27 |
-| Filled 12:00-15:00 | 400 | 17.0% | -0.12 | 0.83 | -47.81 | -80.16 | -0.22 | -0.02 |
-| Risk 0.20-0.35% of price | 667 | 17.4% | -0.13 | 0.82 | -84.76 | -112.65 | -0.12 | -0.13 |
-| Risk 0.35%+ of price | 0 | | | | | | | |
-| A 15-minute magnet sits before 4R | 77 | 14.3% | -0.30 | 0.57 | -22.78 | -32.72 | -0.05 | -0.54 |
-| Clear path to 4R | 590 | 17.8% | -0.11 | 0.85 | -61.98 | -80.40 | -0.14 | -0.07 |
-| Trendline with 3+ touches | 166 | 16.9% | -0.21 | 0.72 | -34.88 | -47.97 | -0.34 | -0.08 |
+| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | Design avg R (to Aug) | Confirm avg R (Sep on) | Avg R, realistic cost |
+|---|---|---|---|---|---|---|---|---|---|
+| FVG stop, 4R (core) | 431 | 18.3% | -0.11 | 0.86 | -45.90 | -71.97 | -0.16 (n=315) | 0.03 (n=116) | 0.07 |
+| without daily trend | 1056 | 15.4% | -0.24 | 0.68 | -258.41 | -271.24 | -0.21 (n=705) | -0.31 (n=351) | -0.07 |
+| without VWAP | 668 | 17.1% | -0.18 | 0.76 | -119.42 | -139.84 | -0.17 (n=481) | -0.19 (n=187) | 0.00 |
+| without opening range | 622 | 16.4% | -0.19 | 0.75 | -117.85 | -139.57 | -0.23 (n=454) | -0.07 (n=168) | -0.01 |
+| without Fibonacci | 671 | 15.4% | -0.22 | 0.70 | -149.93 | -173.77 | -0.24 (n=490) | -0.18 (n=181) | -0.04 |
+| without trendline | 1667 | 18.4% | -0.16 | 0.79 | -265.03 | -283.91 | -0.16 (n=1228) | -0.16 (n=439) | 0.02 |
 
-## 4. Core model: exits and costs
+## 3. FVG stop, 4R (core): exit methods
+
+| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | Design avg R (to Aug) | Confirm avg R (Sep on) | Avg R, realistic cost |
+|---|---|---|---|---|---|---|---|---|---|
+| Half at the target, rest to the 15-minute magnet (plan) | 431 | 18.3% | -0.11 | 0.86 | -45.90 | -71.97 | -0.16 (n=315) | 0.03 (n=116) | 0.07 |
+| Everything at the target | 431 | 18.3% | -0.10 | 0.86 | -43.50 | -63.10 | -0.16 (n=315) | 0.05 (n=116) |  |
+| Half at the target, rest held to the close | 431 | 18.3% | -0.11 | 0.85 | -47.14 | -73.20 | -0.16 (n=315) | 0.03 (n=116) |  |
+| Plan, before any cost | 431 | 18.6% | 0.09 | 1.16 | 40.42 | -26.08 | 0.04 (n=315) | 0.23 (n=116) |  |
+
+## 4. FVG stop, 4R (core): by symbol type, entry time, risk size, room to the first magnet
+
+| Group | Trades | Win rate | Avg R | Profit factor | Total R | Max DD R | Design avg R (to Aug) | Confirm avg R (Sep on) | Avg R, realistic cost |
+|---|---|---|---|---|---|---|---|---|---|
+| SPY | 7 | 28.6% | -0.35 | 0.36 | -2.43 | -3.80 | -0.21 (n=5) | -0.70 (n=2) | -0.15 |
+| Stocks | 424 | 18.2% | -0.10 | 0.86 | -43.48 | -69.74 | -0.16 (n=310) | 0.04 (n=114) | 0.08 |
+| Filled 10:30-12:00 | 137 | 22.6% | 0.01 | 1.02 | 1.76 | -28.69 | 0.03 (n=103) | -0.03 (n=34) | 0.19 |
+| Filled 12:00-15:00 | 294 | 16.3% | -0.16 | 0.78 | -47.67 | -65.68 | -0.25 (n=212) | 0.05 (n=82) | 0.02 |
+| Risk under 0.35% of price | 431 | 18.3% | -0.11 | 0.86 | -45.90 | -71.97 | -0.16 (n=315) | 0.03 (n=116) | 0.07 |
+| Risk 0.35%+ of price | 0 | | | | | | | | |
+| A 15-minute magnet sits before the target | 40 | 12.5% | -0.37 | 0.50 | -14.64 | -17.72 | -0.53 (n=31) | 0.21 (n=9) | -0.19 |
+| Clear path to the target | 391 | 18.9% | -0.08 | 0.89 | -31.26 | -57.17 | -0.12 (n=284) | 0.01 (n=107) | 0.10 |
+
+## 5. FVG stop, 4R (core): exits and costs
 
 | Exit | Trades |
 |---|---|
-| Stop | 364 |
-| Breakeven | 180 |
-| 4R then close | 53 |
-| Close | 33 |
-| 4R then breakeven | 31 |
-| 4R then magnet | 6 |
+| Stop | 248 |
+| Breakeven | 101 |
+| Target then close | 42 |
+| Target then breakeven | 24 |
+| Close | 14 |
+| Target then magnet | 2 |
 
-Average cost per trade: 0.20R. Trades reaching 4R: 13.5%. Median risk: 0.20% of price.
+Standard cost: 0.20R per trade. Realistic cost: 0.02R. Trades reaching the target: 15.8%. Median risk: 0.20% of price.
 
-## 5. Core model by symbol (top and bottom 8 by total R)
+## 6. FVG stop, 4R (core) by symbol (top and bottom 8 by total R)
 
 | Symbol | Trades | Avg R | Total R |
 |---|---|---|---|
-| RTX | 11 | 1.24 | 13.62 |
+| RTX | 9 | 1.67 | 15.02 |
 | IBM | 12 | 1.07 | 12.86 |
-| C | 3 | 3.75 | 11.25 |
-| PANW | 14 | 0.71 | 9.89 |
-| SNOW | 16 | 0.61 | 9.73 |
-| DELL | 16 | 0.57 | 9.06 |
-| WMT | 6 | 1.47 | 8.82 |
-| NOW | 8 | 0.98 | 7.80 |
-| IBIT | 10 | -0.70 | -7.00 |
-| JNJ | 10 | -0.70 | -7.00 |
-| SOXX | 10 | -0.70 | -7.00 |
-| MA | 11 | -0.65 | -7.20 |
-| SMH | 9 | -0.98 | -8.80 |
-| COIN | 8 | -1.19 | -9.56 |
-| DIA | 14 | -0.69 | -9.70 |
-| AMAT | 11 | -0.92 | -10.17 |
+| PANW | 12 | 1.02 | 12.29 |
+| DELL | 14 | 0.82 | 11.42 |
+| NOW | 7 | 1.29 | 9.00 |
+| C | 2 | 2.67 | 5.35 |
+| KLAC | 12 | 0.38 | 4.51 |
+| CAT | 2 | 1.62 | 3.24 |
+| ABBV | 6 | -0.89 | -5.33 |
+| SHOP | 8 | -0.70 | -5.60 |
+| MA | 10 | -0.60 | -6.00 |
+| MRK | 5 | -1.20 | -6.00 |
+| AMD | 6 | -1.03 | -6.20 |
+| JNJ | 9 | -0.76 | -6.80 |
+| COIN | 7 | -1.19 | -8.36 |
+| LLY | 12 | -0.78 | -9.42 |
 
-How to read this: a rule earns its place when switching it off (section 1) lowers the average R in BOTH halves. Fewer than about 100 core trades is too small a sample to trust.
+How to read this: the variant is chosen on May-August only; September onward is the honest test. A rule earns its place when switching it off (section 2) lowers the average R in both periods.
