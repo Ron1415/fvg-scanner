@@ -54,6 +54,7 @@ STOP_ATR_BUFFER = 0.1           # stop = sweep extreme - 0.1 x 5-minute ATR
 WEIGHTS = {                     # Setup Score points (normalized to 0-100)
     "sweep_pd": 20, "sweep_other": 15, "mss": 15, "zone": 10, "ote": 15, "rr": 10,
     "bias": 10, "bias_neutral": 4, "vol": 5, "time": 5, "prox": 10,
+    "tl": 10,                   # trendline retest confluence (added Nov 4, 2026; auto-tune adjusts it)
 }
 FILTERS = {"require_ote": True, "min_rr_t1": 1.0, "min_rr_t2": 2.0, "min_score": 0}
 TOP_N = 5
@@ -77,7 +78,8 @@ TESTS = {
     # ote_mid = current (middle of the FVG/OTE overlap); fvg_edge = first touch of the gap;
     # fvg_ce = gap midpoint; blend = halfway between the gap's near edge and ote_mid (added Nov 3,
     # Ron's idea); ote_62 = first touch of the OTE zone (62% retracement)
-    "entries": ["ote_mid", "fvg_edge", "fvg_ce", "blend", "ote_62"],
+    # tl_line = limit at the broken trendline's level at the snapshot (only when it sits in the entry zone)
+    "entries": ["ote_mid", "fvg_edge", "fvg_ce", "blend", "ote_62", "tl_line"],
     "stop_buffers": [0.1, 0.3],                        # ATR beyond the sweep extreme
     # v3 tests (Nov 3): confirmation entry on 1-minute bars (Alpaca in the backtest, Yahoo for
     # the daily replay; futures fall back to 5-minute bars). Recorded as r_confirm / r_runner.
@@ -85,6 +87,11 @@ TESTS = {
     # Candidate filters for the review (not live rules): midday window, minimum risk, minimum FVG size,
     # VWAP side, "in play" opening relative volume.
     "v3": {"window": (690, 870), "min_risk_pct": 0.3, "min_gap_atr": 0.5, "in_play_rvol": 1.5},
+    # Trendline retest test (Nov 4, 2026, from Ron's 1-minute CHoCH/FVG/Fib notes): the falling line
+    # across the lower highs into the sweep (rising line for shorts) is broken, then retested from the
+    # other side inside the FVG. "retest_at_fill_atr": the trade only counts as a retest when the
+    # trendline is within this many ATR of the fill price at the moment of the fill.
+    "trendline": {"retest_at_fill_atr": 0.3},
     # Scaled entries: several limit orders, one shared stop and targets. Weights = share of the
     # full position at each price (shallowest first). Results are in R of the full planned risk.
     "ladders": {

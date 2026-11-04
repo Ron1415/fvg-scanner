@@ -1,0 +1,82 @@
+name: fvg-scan
+
+on:
+  schedule:
+    # Times are UTC. Every 15 minutes covers 9:25 AM - 4:05 PM ET (live scans) and the
+    # end-of-day job after 4:15 PM ET, in both summer (EDT) and winter (EST) time.
+    # The scanner itself decides what to do from the New York time.
+    - cron: "*/15 13-21 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "live = scan now, eod = end-of-day replay + review, backtest = replay past days, review = rebuild the review, fvg1m = 1-minute model backtest"
+        default: "live"
+      backtest_days:
+        description: "Backtest length in trading days (125 = about 6 months)"
+        default: "125"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency: fvg-scan
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Cache downloaded history
+        uses: actions/cache@v4
+        with:
+          path: cache
+          key: fvg-cache-${{ github.run_id }}
+          restore-keys: fvg-cache-
+
+      - name: Run
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          BT_DAYS: ${{ github.event.inputs.backtest_days }}
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: |
+          if [ "$MODE" = "fvg1m" ]; then python fvg1m.py --backtest "${BT_DAYS:-125}"
+          elif [ "$MODE" = "backtest" ]; then python scanner.py --backtest "${BT_DAYS:-125}"
+          elif [ "$MODE" = "eod" ]; then python scanner.py --eod
+          elif [ "$MODE" = "review" ]; then python scanner.py --review
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then python scanner.py --live
+          else python scanner.py --auto
+          fi
+
+      - name: Save results
+        run: |
+          git config user.name "fvg-bot"
+          git config user.email "actions@users.noreply.github.com"
+          for f in site history backtest backtest_1m review_1m.md universe.json review.md review_log.csv tuning.json config_changes.json; do
+            if [ -e "$f" ]; then git add -A "$f"; fi
+          done
+          git diff --cached --quiet || git commit -m "FVG $(TZ=America/New_York date '+%Y-%m-%d %H:%M ET')"
+          # trades may have been saved from the dashboard during the run
+          for i in 1 2 3; do git pull --rebase -q && git push && break; sleep 5; done
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

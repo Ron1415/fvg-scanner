@@ -57,6 +57,29 @@ A day-trading scanner and trainer for the ICT Fair Value Gap strategy on 5-minut
 
 From then on, everything runs on its own on weekdays.
 
+## 1-minute long model (added November 4, 2026)
+
+A separate, simpler model on 1-minute bars: `fvg1m.py`, settings in `config_1m.py`, checks in `test_fvg1m.py`, and the same rules as a TradingView strategy in `FVG_1m_Strategy.pine`.
+
+1. **Up-trend bias only (long only):** the prior daily close is above a rising 20-day average, the entry is above VWAP, and a 1-minute close has broken above the 9:30-9:45 opening range.
+2. **Break of structure:** the first close above the last lower high.
+3. **FVG:** a bullish fair value gap in the move up.
+4. **Entry:** a limit order at the FVG midpoint, which must sit at the 50-61.8% retracement of the move and on the broken falling trendline.
+5. **Risk and exits:** stop below the FVG (at least 0.20% of price); half off at 4R; stop to breakeven once a close clears the recent high; the rest rides to the next untouched 15-minute FVG above, or the 3:55 PM close.
+
+**Backtest:** run the workflow with mode `fvg1m` and 125 days (needs the Alpaca keys for 1-minute history). Results go to `review_1m.md` and `backtest_1m/trades.csv.gz`. Section 1 of the review switches each rule off in turn, so it shows what every rule adds.
+
+## Trendline retest confluence (added November 4, 2026)
+
+Each setup now records the counter-trend line of the leg into the sweep: for longs, a falling line across the lower highs; for shorts, a rising line across the higher lows. The line must have held (no close beyond it) until the sweep, and must then be broken by a close.
+
+- **Confluence (`tl_conf`):** the line has not failed, and its level at the next bar sits inside the entry zone (FVG near edge to the entry), within 0.25 ATR. A pullback into the FVG would then also retest the broken line.
+- **Score:** confluence adds the `tl` weight (10 points). The weekly auto-tune adjusts it like the other weights.
+- **Retest at the fill (`r_tl`):** the plan result, counted only when the line was within 0.3 ATR of the fill price at the moment of the fill.
+- **Entry variant (`tl_line`):** a limit order at the line's level, tested with both stop buffers.
+- **Review:** section 11 compares setups with and without the confluence. Only rows recorded from November 4 carry the trendline, so rerun the backtest (mode `backtest`, 125 days) to fill in history.
+- **Settings:** `TESTS["trendline"]` and `WEIGHTS["tl"]` in `config.py`; `TL_ZONE_ATR` in `engine.py`.
+
 ## Schedule
 
 - **Every 15 minutes, 9:25 AM–4:05 PM ET:** a live scan updates the dashboard and freezes any new setups into `history/live_YYYY-MM.csv`. GitHub schedules can start 5–15 minutes late.

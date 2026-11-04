@@ -147,7 +147,68 @@ def test_confirmation_and_runner():
     check("runner holds past T2 until the close", o["outcome"] == "T1 then EOD" and o["r_plan"] > 2.5)
 
 
+def tl_day(date, after):
+    # (o, h, l, c): opening range, falling lower highs (101.6 / 101.4 / 101.2) into a sweep of the
+    # opening-range low, a break of the falling line with an FVG, then a pullback that retests the line
+    rows = [(101.6, 101.9, 101.5, 101.8), (101.8, 102.0, 101.6, 101.7), (101.7, 101.8, 101.5, 101.6),
+            (101.6, 101.7, 101.5, 101.55), (101.55, 101.6, 101.45, 101.5), (101.5, 101.55, 101.45, 101.5),
+            (101.5, 101.5, 101.2, 101.25), (101.25, 101.3, 101.0, 101.1),
+            (101.1, 101.6, 101.05, 101.4),      # lower high 1 (8)
+            (101.4, 101.35, 100.9, 100.95), (100.95, 101.0, 100.7, 100.8),
+            (100.8, 101.4, 100.75, 101.2),      # lower high 2 (11)
+            (101.2, 101.15, 100.6, 100.65), (100.65, 100.7, 100.4, 100.5),
+            (100.5, 101.2, 100.45, 101.0),      # lower high 3 (14)
+            (101.0, 101.05, 100.3, 100.35), (100.35, 100.4, 99.9, 100.0),
+            (100.0, 100.1, 99.5, 99.7),         # sweep low (17)
+            (99.7, 100.5, 99.65, 100.45),       # 18
+            (100.45, 101.5, 100.05, 101.45),    # displacement (19)
+            (101.45, 102.2, 101.3, 102.1),      # 20: gap 100.5 - 101.3
+            (102.1, 102.3, 101.9, 102.0)] + after
+    out, d0 = [], dt.datetime.fromisoformat(date + "T09:30").replace(tzinfo=NY)
+    for i, (o, h, l, c) in enumerate(rows):
+        t = d0 + dt.timedelta(minutes=5 * i)
+        out.append(Bar(int(t.timestamp()), date, 570 + 5 * i, o, h, l, c, 4000 if i == 19 else 1000))
+    return out
+
+PULLBACK = [(102.0, 102.05, 101.4, 101.5), (101.5, 101.55, 100.9, 101.0), (101.0, 101.1, 100.5, 100.7),
+            (100.7, 101.6, 100.65, 101.5), (101.5, 102.5, 101.4, 102.4), (102.4, 103.2, 102.3, 103.1)]
+
+
+def mirror(bars_, pivot=200.0):
+    return [b._replace(o=pivot - b.o, h=pivot - b.l, l=pivot - b.h, c=pivot - b.c) for b in bars_]
+
+
+def test_trendline():
+    """Falling line across three lower highs, broken by the displacement; the pullback into the
+    FVG retests the line from above (Ron's trendline-retest confluence, Nov 4, 2026)."""
+    prev = synthetic_day("2026-10-28", "win")
+    day = tl_day("2026-10-29", [])
+    lv = E.levels_for(prev + day, "2026-10-29", "2026-10-28", False)
+    s = [x for x in E.find_setups(day, lv) if x["side"] == "LONG"][0]
+    check("trendline found with 3 touches and broken", s["tl_found"] and s["tl_touches"] == 3 and not s["tl_failed"])
+    check("trendline level sits in the entry zone (confluence)", s["tl_conf"] and s["fvg_lo"] - 0.2 <= s["tl_next"] <= s["fvg_hi"])
+    E.score(s, day[-1].c, "Neutral", 680, E.settings())
+    check("confluence adds score points and a note", s["pts"]["tl"] > 0 and any("Trendline" in n for n in s["notes"]))
+    check("no trendline on a chart without lower highs",
+          not [x for x in E.find_setups([b for b in synthetic_day("2026-10-29", "win") if b.min < 655], lv) if x["side"] == "LONG"][0]["tl_found"])
+    # mirror image: rising line across higher lows, broken down, retested from below
+    mp, md = mirror(prev), mirror(day)
+    mlv = E.levels_for(mp + md, "2026-10-29", "2026-10-28", False)
+    ms = [x for x in E.find_setups(md, mlv) if x["side"] == "SHORT"][0]
+    check("short: rising trendline confluence in real prices",
+          ms["tl_conf"] and abs(ms["tl_next"] - (200 - s["tl_next"])) < 1e-6 and ms["tl_slope_min"] > 0)
+    closes = [(f"2026-{m:02d}-{d:02d}", 90 + i * 0.1) for i, (m, d) in enumerate([(9, x) for x in range(1, 29)] + [(10, x) for x in range(1, 28)])]
+    full = tl_day("2026-10-29", PULLBACK)
+    rows = [r for r in replay_ticker("TEST", prev + full, closes, "Backtest", E.settings(), {"2026-10-29"}) if r["side"] == "LONG"]
+    r = rows[0]
+    check("replay records trendline confluence", r["tl_conf"] and r["tl_touches"] == 3)
+    check("fill was a retest of the line", r["triggered"] and r["tl_retest_fill"] and abs(r["tl_fill_dist_atr"]) <= 0.3)
+    check("r_tl equals the plan result when the fill retests the line", r["r_tl"] == r["r_plan_net"] and r["r_tl"] > 0)
+    check("entry-at-trendline variant triggers", r["trig_tl_line_0.1"] and r["r_tl_line_0.1"] > 0)
+
+
 if __name__ == "__main__":
+    test_trendline()
     test_confirmation_and_runner()
     test_short_rules()
     test_overnight_futures()

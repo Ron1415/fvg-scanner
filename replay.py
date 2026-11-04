@@ -24,6 +24,10 @@ LADDERS = C.TESTS.get("ladders", {})
 COLUMNS.insert(COLUMNS.index("extreme"), "ote_62")
 # v3 tests (Nov 3): VWAP side, opening relative volume ("in play"), FVG size, confirmation entry, runner
 COLUMNS += ["vwap", "vwap_ok", "open_rvol", "gap_atr", "trig_confirm", "r_confirm", "confirm_tf", "r_runner"]
+# Trendline retest confluence (Nov 4): line found/broken, confluence at the snapshot, line level at the
+# fill, and the plan result counted only when the fill was a retest of the line (r_tl)
+COLUMNS += ["tl_found", "tl_conf", "tl_touches", "tl_next", "tl_dist_atr", "tl_a_min", "tl_a_price", "tl_slope_min",
+            "tl_fill_dist_atr", "tl_retest_fill", "r_tl"]
 for _e, _b in VARIANTS:
     COLUMNS += [f"trig_{_e}_{_b}", f"r_{_e}_{_b}"]
 for _l in LADDERS:
@@ -54,14 +58,23 @@ def snapshot(s: dict, source: str, freeze_ts: float, suggested: bool, rank, cfg:
         "vwap": r3(s.get("vwap")), "open_rvol": r3(s.get("open_rvol")),
         "vwap_ok": None if s.get("vwap") is None else (s["price"] > s["vwap"] if s["side"] == "LONG" else s["price"] < s["vwap"]),
         "gap_atr": r3((s["fvg_hi"] - s["fvg_lo"]) / s["atr"]) if s.get("atr") else None,
+        "tl_found": s.get("tl_found", False), "tl_conf": s.get("tl_conf", False), "tl_touches": s.get("tl_touches", 0),
+        "tl_next": r3(s.get("tl_next")), "tl_dist_atr": r3(s.get("tl_dist_atr")), "tl_a_min": s.get("tl_a_min"),
+        "tl_a_price": r3(s.get("tl_a_price")), "tl_slope_min": None if s.get("tl_slope_min") is None else round(s["tl_slope_min"], 8),
     }
 
 
 def entry_price(row: dict, kind: str) -> float:
     long = row["side"] == "LONG"
     edge = row["fvg_hi"] if long else row["fvg_lo"]
+    if kind == "tl_line":   # only when the broken trendline sits in the entry zone at the snapshot
+        return row.get("tl_next") if _truthy(row.get("tl_conf")) else None
     return {"ote_mid": row["entry"], "fvg_edge": edge, "fvg_ce": row["ce"], "blend": (edge + row["entry"]) / 2,
             "ote_62": row.get("ote_62")}[kind]
+
+
+def _truthy(v) -> bool:
+    return str(v).strip().lower() in ("true", "1", "1.0", "yes")
 
 
 def variant_levels(row: dict, entry_kind: str, buf: float) -> dict:
@@ -81,6 +94,16 @@ def evaluate(row: dict, bars_after: list, sim: dict = C.SIM, fine_after: list | 
                fill=r3(o["fill"]), exit_time=_clock(row, o["exit_min"]), r_plan=r3(o["r_plan"]), r_plan_net=r3(o["r_plan_net"]),
                r_t1=r3(o["r_t1"]), r_t2=r3(o["r_t2"]), mfe=r3(o["mfe"]), mae=r3(o["mae"]),
                mins_to_trigger=o["mins_to_trigger"], mins_in_trade=o["mins_in_trade"])
+    # trendline retest at the fill: is the broken line within N ATR of the fill when the order fills?
+    tlc = C.TESTS.get("trendline", {})
+    line = E.tl_at(row, o["trigger_min"]) if o["triggered"] else None
+    if line is not None and row.get("atr"):
+        dist = (o["fill"] - line) / row["atr"] * (1 if row["side"] == "LONG" else -1)
+        row["tl_fill_dist_atr"] = r3(dist)
+        row["tl_retest_fill"] = abs(dist) <= tlc.get("retest_at_fill_atr", 0.3)
+    else:
+        row["tl_fill_dist_atr"], row["tl_retest_fill"] = None, False
+    row["r_tl"] = row["r_plan_net"] if row["tl_retest_fill"] else None
     for e, b in VARIANTS:
         lv = variant_levels(row, e, b)
         if lv["entry"] is None or not ((lv["entry"] > lv["stop"]) if row["side"] == "LONG" else (lv["entry"] < lv["stop"])):

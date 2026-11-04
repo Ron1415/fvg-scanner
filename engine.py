@@ -106,6 +106,41 @@ def _pivot_highs(H, end, k=2):
     return out
 
 
+def trendline(H, C_, s, n, atr, piv, tol=None, max_piv=8):
+    """Counter-trend line of the leg INTO the sweep (longs: a falling line across lower highs;
+    shorts reuse it on negated prices). Ron's "liquidity inflection level" (Nov 4, 2026): price
+    respected the line, broke it, and may retest it from the other side.
+    A line through two pivot highs a < b (H[a] > H[b], 3+ bars apart) is valid when no close from
+    a to the sweep is more than `tol` above it. Most touches wins (pivots within tol), then the most
+    recent. Returns None if there is no valid line or it has not been broken by a close yet."""
+    tol = 0.1 * atr if tol is None else tol
+    cands = [p for p in piv if p < s][-max_piv:]
+    best = None
+    for ai, a in enumerate(cands):
+        for b in cands[ai + 1:]:
+            if b - a < 3 or not H[a] > H[b]:
+                continue
+            slope = (H[b] - H[a]) / (b - a)
+            y = lambda j: H[a] + slope * (j - a)
+            if any(C_[j] > y(j) + tol for j in range(a, s + 1)):
+                continue
+            touches = sum(1 for p in cands if p >= a and abs(H[p] - y(p)) <= tol)
+            key = (touches, b, a)
+            if best is None or key > best[0]:
+                best = (key, a, b, slope)
+    if best is None:
+        return None
+    (touches, _, _), a, b, slope = best
+    y = lambda j: H[a] + slope * (j - a)
+    brk = next((j for j in range(s + 1, n) if C_[j] > y(j)), None)
+    if brk is None:
+        return None
+    # the line "fails" if, after the break, a close lands back below it by more than 0.25 ATR
+    failed = any(C_[j] < y(j) - 0.25 * atr for j in range(brk + 1, n))
+    return {"tl_a_idx": a, "tl_b_idx": b, "tl_slope": slope, "tl_a_price": H[a], "tl_touches": touches,
+            "tl_brk_idx": brk, "tl_failed": failed, "tl_next": y(n)}
+
+
 def detect_long(H, L, C_, V, liq: dict, extra: dict, ote=C.OTE, stop_buf=C.STOP_ATR_BUFFER):
     n = len(L)
     if n < 6:
@@ -160,12 +195,13 @@ def detect_long(H, L, C_, V, liq: dict, extra: dict, ote=C.OTE, stop_buf=C.STOP_
             invalid = True
     hit = touched is not None and any(H[j] >= t1 for j in range(touched, n))
     status = "Invalidated" if invalid else "Target hit" if hit else "Entry reached" if touched is not None else "Pending"
+    tl = trendline(H, C_, s, n, atr, piv) if atr > 0 else None
     pre_v = [v for v in V[:i] if v > 0]
     rvol = V[i] / (sum(pre_v) / len(pre_v)) if pre_v and sum(pre_v) > 0 else 1.0
     return dict(sweep_idx=s, fvg_idx=i, mss_idx=m, swept=swept, extreme=low, swing=sh, mss=mss, fvg_a=fvg_a,
                 fvg_b=fvg_b, ce=ce, eq=eq, ote_a=ote_a, ote_mid=ote_mid, ote_b=ote_b, overlap=overlap,
                 entry=entry, stop=stop, t1=t1, t2=t2, rr1=(t1 - entry) / risk, rr2=(t2 - entry) / risk,
-                status=status, rvol=rvol, atr=atr)
+                status=status, rvol=rvol, atr=atr, tl=tl)
 
 
 PRICE_KEYS = ["extreme", "swing", "mss", "fvg_a", "fvg_b", "ce", "eq", "ote_a", "ote_mid", "ote_b",
@@ -189,10 +225,48 @@ def find_setups(rth: list, lv: dict) -> list[dict]:
             sh[k] = -sh[k]
         sh["side"] = "SHORT"; out.append(sh)
     for s in out:
+        _trendline_fields(s, rth)
         s["fvg_lo"], s["fvg_hi"] = sorted([s["fvg_a"], s["fvg_b"]])
         s["ote_lo"], s["ote_hi"] = sorted([s["ote_a"], s["ote_b"]])
         s["sweep_min"], s["fvg_min"] = rth[s["sweep_idx"]].min, rth[s["fvg_idx"]].min
     return out
+
+
+TL_ZONE_ATR = 0.25   # trendline counts as confluence within 0.25 ATR of the entry zone
+
+
+def _trendline_fields(s: dict, rth: list) -> None:
+    """Adds tl_* fields in real prices and session minutes (shorts were found on negated prices).
+    tl_conf: the line has been broken, has not failed, and its projected level at the next bar sits
+    inside the entry zone (FVG near edge down to the entry) +/- TL_ZONE_ATR x ATR, i.e. a pullback
+    into the FVG would also retest the broken line."""
+    tl, sgn = s.pop("tl", None), (1 if s["side"] == "LONG" else -1)
+    blank = {"tl_found": False, "tl_conf": False, "tl_touches": 0, "tl_next": None, "tl_a_min": None,
+             "tl_a_price": None, "tl_slope_min": None, "tl_dist_atr": None, "tl_failed": None}
+    if not tl:
+        s.update(blank)
+        return
+    a, b = tl["tl_a_idx"], tl["tl_b_idx"]
+    per_bar = (rth[b].min - rth[a].min) / (b - a) if b > a else 5
+    nxt = sgn * tl["tl_next"]
+    lo, hi = (min(s["entry"], s["fvg_a"]), s["fvg_b"]) if sgn > 0 else (s["fvg_b"], max(s["entry"], s["fvg_a"]))
+    pad = TL_ZONE_ATR * s["atr"]
+    s.update(tl_found=True, tl_touches=tl["tl_touches"], tl_next=nxt, tl_a_min=rth[a].min,
+             tl_a_price=sgn * tl["tl_a_price"], tl_slope_min=sgn * tl["tl_slope"] / (per_bar or 5),
+             tl_failed=tl["tl_failed"], tl_brk_min=rth[tl["tl_brk_idx"]].min,
+             tl_dist_atr=sgn * (s["entry"] - nxt) / s["atr"] if s["atr"] else None,
+             tl_conf=(not tl["tl_failed"]) and lo - pad <= nxt <= hi + pad)
+
+
+def tl_at(row: dict, minute) -> float | None:
+    """Trendline price at a session minute (None if the setup has no line)."""
+    try:
+        a_min, a_px, sl = float(row["tl_a_min"]), float(row["tl_a_price"]), float(row["tl_slope_min"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(v != v for v in (a_min, a_px, sl)):   # NaN from CSV
+        return None
+    return a_px + sl * (float(minute) - a_min)
 
 
 def apply_live(s: dict, price: float) -> None:
@@ -234,13 +308,16 @@ def score(s: dict, price: float, bias: str, now_min: int, cfg: dict) -> int:
     pts["vol"] = w["vol"] if s["rvol"] >= 1.5 else 0
     if pts["vol"]:
         notes.append(f"Displacement vol {s['rvol']:.1f}x")
+    pts["tl"] = w.get("tl", 0) if s.get("tl_conf") else 0
+    if s.get("tl_conf"):
+        notes.append(f"Trendline retest confluence ({s['tl_touches']} touches)")
     pts["time"] = w["time"] if C.OR_END <= now_min <= C.SIM["plan_window_end"] else 0
     far = s["swing"] - s["entry"] if long else s["entry"] - s["swing"]
     dist = price - s["entry"] if long else s["entry"] - price
     prox = 1.0 if dist <= 0 else max(0.0, 1 - dist / far) if far > 0 else 0.0
     pts["prox"] = w["prox"] * prox
     s.update(pts=pts, notes=notes, proximity=prox, dist_pct=abs(price - s["entry"]) / price * 100)
-    mx = max(w["sweep_pd"], w["sweep_other"]) + w["mss"] + w["zone"] + w["ote"] + w["rr"] + w["bias"] + w["vol"] + w["time"] + w["prox"]
+    mx = max(w["sweep_pd"], w["sweep_other"]) + w["mss"] + w["zone"] + w["ote"] + w["rr"] + w["bias"] + w["vol"] + w["time"] + w["prox"] + w.get("tl", 0)
     s["score"] = min(100, round(100 * sum(pts.values()) / mx)) if mx > 0 else 0
     return s["score"]
 

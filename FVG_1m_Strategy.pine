@@ -1,0 +1,293 @@
+//@version=6
+// FVG 1-Minute Long Model (Ron, Nov 4, 2026). Same rules as fvg1m.py in the fvg-scanner repository.
+// Use on a 1-minute chart of a US stock or ETF with regular trading hours only (no extended hours).
+//   1. Up-trend bias: daily trend up, price above VWAP, 9:30-9:45 opening range broken upward.
+//   2. Break of structure: first close above the last lower high (swing high lower than the one before).
+//   3. A bullish FVG in the move up.
+//   4. Limit order at the FVG midpoint, which must sit at the 50-61.8% retracement and on the broken
+//      falling trendline (the line across the lower highs of the pullback).
+//   5. Stop below the FVG (at least 0.20% of price); half off at 4R; breakeven once a close clears the
+//      recent high; the rest rides to the next untouched 15-minute FVG above, or the 3:55 PM close.
+// Educational tool only; not financial advice. Backtest before risking money.
+strategy("FVG 1-Minute Long Model", shorttitle = "FVG 1m", overlay = true, initial_capital = 100000,
+     commission_type = strategy.commission.percent, commission_value = 0.02, pyramiding = 0,
+     max_bars_back = 1000, max_lines_count = 100, max_labels_count = 100, max_boxes_count = 100)
+
+// ---------------------------------------------------------------- inputs
+useDaily   = input.bool(true, "Daily trend up (prior close above a rising 20-day average)", group = "Rules")
+useVwap    = input.bool(true, "Entry above VWAP", group = "Rules")
+useOrb     = input.bool(true, "Opening range (9:30-9:45) broken upward", group = "Rules")
+useFib     = input.bool(true, "FVG midpoint at the 50-61.8% retracement", group = "Rules")
+useTl      = input.bool(true, "Broken trendline runs through the FVG", group = "Rules")
+pivK       = input.int(3, "Swing strength (bars each side)", minval = 1, group = "Structure")
+maxWait    = input.int(30, "Cancel if no fill within (bars after the break)", minval = 1, group = "Structure")
+maxTrades  = input.int(2, "Maximum trades per day", minval = 1, group = "Structure")
+minGapPct  = input.float(0.02, "Minimum FVG height (% of price)", step = 0.01, group = "Structure")
+fibLo      = input.float(0.45, "Retracement zone from", step = 0.01, group = "Structure")
+fibHi      = input.float(0.70, "Retracement zone to", step = 0.01, group = "Structure")
+tlPad      = input.float(0.25, "Trendline may sit outside the FVG by (x ATR)", step = 0.05, group = "Structure")
+tlTol      = input.float(0.10, "Closes may poke through the line by (x ATR)", step = 0.05, group = "Structure")
+stopAtr    = input.float(0.10, "Stop below the FVG by (x ATR)", step = 0.05, group = "Risk")
+minRiskPct = input.float(0.20, "Minimum stop distance (% of price)", step = 0.05, group = "Risk")
+targetR    = input.float(4.0, "First target (R)", step = 0.5, group = "Risk")
+partialPct = input.int(50, "Sell at the first target (%)", minval = 1, maxval = 100, group = "Risk")
+riskPct    = input.float(1.0, "Risk per trade (% of equity)", step = 0.25, group = "Risk")
+maxPosPct  = input.float(5.0, "Maximum position (% of equity)", step = 1.0, group = "Risk")
+useMagnets = input.bool(true, "Runner exits at the next untouched 15-minute FVG", group = "Risk")
+showLines  = input.bool(true, "Draw FVG, trendline and trade levels", group = "Display")
+
+// ---------------------------------------------------------------- session clock (New York)
+NY = "America/New_York"
+OPEN_M = 570
+OR_END = 585
+ENTRY_END = 900
+EOD_M = 955
+RTH_END = 960
+m = hour(time, NY) * 60 + minute(time, NY)
+newDay = ta.change(dayofmonth(time, NY)) != 0
+inRth = m >= OPEN_M and m < RTH_END
+
+// ---------------------------------------------------------------- series
+atr1 = ta.sma(high - low, 14)
+vwapV = ta.vwap(hlc3)
+ph = ta.pivothigh(high, pivK, pivK)
+[dC1, dS1, dS6] = request.security(syminfo.tickerid, "D", [close[1], ta.sma(close, 20)[1], ta.sma(close, 20)[6]], lookahead = barmerge.lookahead_on)
+dailyUp = dC1 > dS1 and dS1 > dS6
+// last COMPLETED 15-minute bars (no repainting): [1] = newest completed, [3] = two before it
+[h15a, l15a, h15c, l15c, t15] = request.security(syminfo.tickerid, "15", [high[3], low[3], high[1], low[1], time[1]], lookahead = barmerge.lookahead_on)
+
+// ---------------------------------------------------------------- state
+var int dayStart = 0
+var int dayNum = 0
+var float orh = na
+var bool orBroken = false
+var int tradesToday = 0
+var pivIdx = array.new<int>()
+var pivHi = array.new<float>()
+var int lastUsed = -1
+var magLo = array.new<float>()
+var magDay = array.new<int>()
+
+var bool hasSetup = false
+var int bosBar = 0
+var int l0Bar = 0
+var float l0Low = na
+var bool hasTl = false
+var int tlA = 0
+var float tlAPx = na
+var float tlSl = na
+var int tlTouches = 0
+var bool tlBroken = false
+
+var float tStop = na
+var float tEntry = na
+var float tRecentHigh = na
+var float tT1 = na
+var float tRunner = na
+var float posInit = 0.0
+var float planHigh = na
+
+if newDay
+    dayStart := bar_index
+    dayNum += 1
+    orh := na
+    orBroken := false
+    tradesToday := 0
+    array.clear(pivIdx)
+    array.clear(pivHi)
+    lastUsed := -1
+    hasSetup := false
+
+// opening range and its upward break
+if m >= OPEN_M and m < OR_END
+    orh := na(orh) ? high : math.max(orh, high)
+if m >= OR_END and not na(orh) and close > orh
+    orBroken := true
+
+// confirmed swing highs (today only)
+if not na(ph) and bar_index - pivK >= dayStart
+    array.push(pivIdx, bar_index - pivK)
+    array.push(pivHi, ph)
+
+// 15-minute FVG magnets: added when the third bar completes, removed once touched or older than 2 sessions
+if ta.change(t15) != 0 and not na(h15a)
+    if l15c > h15a
+        array.push(magLo, h15a)
+        array.push(magDay, dayNum)
+    else if h15c < l15a
+        array.push(magLo, h15c)
+        array.push(magDay, dayNum)
+if array.size(magLo) > 0
+    for k = array.size(magLo) - 1 to 0
+        if array.get(magLo, k) <= high or dayNum - array.get(magDay, k) > 2
+            array.remove(magLo, k)
+            array.remove(magDay, k)
+
+// ---------------------------------------------------------------- open position: breakeven and exits
+flat = strategy.position_size == 0
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    posInit := strategy.position_size
+    tEntry := strategy.position_avg_price
+    tT1 := tEntry + targetR * (tEntry - tStop)
+    tradesToday += 1
+    hasSetup := false
+if strategy.position_size > 0
+    t1Hit = strategy.position_size < posInit
+    if close > tRecentHigh or t1Hit
+        tStop := math.max(tStop, tEntry)
+    if not t1Hit
+        strategy.exit("T1", "L", qty_percent = partialPct, limit = tT1, stop = tStop, comment_profit = "4R", comment_loss = "Stop")
+    strategy.exit("Run", "L", limit = useMagnets ? tRunner : na, stop = tStop, comment_profit = "Magnet", comment_loss = "BE/Stop")
+if m >= EOD_M and strategy.position_size > 0
+    strategy.close_all(comment = "Close")
+
+// ---------------------------------------------------------------- break of structure
+canTrade = flat and inRth and m < ENTRY_END and tradesToday < maxTrades
+n = array.size(pivIdx)
+if canTrade and not hasSetup and n >= 2
+    p0 = array.get(pivIdx, n - 2)
+    p1 = array.get(pivIdx, n - 1)
+    h0 = array.get(pivHi, n - 2)
+    h1 = array.get(pivHi, n - 1)
+    if p1 != lastUsed and h0 > h1 and close > h1
+        clean = true
+        if bar_index - 1 >= p1 + 1
+            for j = p1 + 1 to bar_index - 1
+                if close[bar_index - j] > h1
+                    clean := false
+        if clean
+            lastUsed := p1
+            l0Bar := p1
+            l0Low := low[bar_index - p1]
+            for j = p1 to bar_index
+                if low[bar_index - j] <= l0Low
+                    l0Low := low[bar_index - j]
+                    l0Bar := j
+            hasSetup := true
+            bosBar := bar_index
+            // falling trendline through two lower highs before the swing low (most touches, then most recent)
+            hasTl := false
+            tlTouches := 0
+            tol = tlTol * atr1
+            nBefore = 0
+            for x = 0 to n - 1
+                if array.get(pivIdx, x) < l0Bar
+                    nBefore += 1
+            firstC = math.max(0, nBefore - 8)
+            bestKey = -1.0
+            for x = firstC to math.max(firstC, nBefore - 1)
+                a = nBefore >= 2 ? array.get(pivIdx, x) : 0
+                if nBefore >= 2 and x + 1 <= nBefore - 1
+                    for y = x + 1 to nBefore - 1
+                        b = array.get(pivIdx, y)
+                        ha = array.get(pivHi, x)
+                        hb = array.get(pivHi, y)
+                        if b - a >= 3 and ha > hb
+                            sl = (hb - ha) / (b - a)
+                            ok = true
+                            for j = a to l0Bar
+                                if close[bar_index - j] > ha + sl * (j - a) + tol
+                                    ok := false
+                                    break
+                            if ok
+                                touches = 0
+                                for z = firstC to nBefore - 1
+                                    pz = array.get(pivIdx, z)
+                                    if pz >= a and math.abs(array.get(pivHi, z) - (ha + sl * (pz - a))) <= tol
+                                        touches += 1
+                                key = touches * 1e6 + (b - dayStart) * 1e3 + (a - dayStart)
+                                if key > bestKey
+                                    bestKey := key
+                                    hasTl := true
+                                    tlA := a
+                                    tlAPx := ha
+                                    tlSl := sl
+                                    tlTouches := touches
+            tlBroken := false
+            if hasTl and l0Bar < bar_index
+                for j = l0Bar + 1 to bar_index
+                    if close[bar_index - j] > tlAPx + tlSl * (j - tlA)
+                        tlBroken := true
+            if showLines
+                label.new(bar_index, high, "BOS", style = label.style_label_down, color = color.new(color.teal, 20), textcolor = color.white, size = size.tiny)
+
+// ---------------------------------------------------------------- keep the setup alive, plan the order
+planned = false
+if hasSetup and canTrade
+    if low < l0Low or bar_index - bosBar > maxWait
+        hasSetup := false
+if hasSetup and canTrade
+    if hasTl and close > tlAPx + tlSl * (bar_index - tlA)
+        tlBroken := true
+    hi = high
+    for j = l0Bar to bar_index
+        hi := math.max(hi, high[bar_index - j])
+    leg = hi - l0Low
+    bestScore = 1e9
+    float ce = na
+    float gLo = na
+    float gHi = na
+    float ret = na
+    if leg > 0 and bar_index - 1 >= l0Bar + 1
+        for j = l0Bar + 1 to bar_index - 1
+            o = bar_index - j
+            lo1 = low[o - 1]
+            hi0 = high[o + 1]
+            if lo1 > hi0 and lo1 - hi0 >= minGapPct / 100 * close
+                mid = (lo1 + hi0) / 2
+                fresh = true
+                if o - 2 >= 0
+                    for q = 0 to o - 2
+                        if low[q] <= mid
+                            fresh := false
+                            break
+                if fresh
+                    r = (hi - mid) / leg
+                    score = (r >= fibLo and r <= fibHi ? 0.0 : 1000.0) + math.abs(r - 0.559)
+                    if score < bestScore
+                        bestScore := score
+                        ce := mid
+                        gLo := hi0
+                        gHi := lo1
+                        ret := r
+    if not na(ce)
+        stop = math.min(gLo - stopAtr * atr1, ce * (1 - minRiskPct / 100))
+        pad = tlPad * atr1
+        line1 = hasTl and tlBroken ? tlAPx + tlSl * (bar_index + 1 - tlA) : na
+        okDaily = not useDaily or dailyUp
+        okVwap = not useVwap or ce > vwapV
+        okOrb = not useOrb or orBroken
+        okFib = not useFib or (ret >= fibLo and ret <= fibHi)
+        okTl = not useTl or (not na(line1) and line1 >= gLo - pad and line1 <= gHi + pad)
+        if okDaily and okVwap and okOrb and okFib and okTl and m >= OR_END - 1 and m < ENTRY_END - 1 and ce > stop
+            risk = ce - stop
+            t1 = ce + targetR * risk
+            float runner = na
+            if array.size(magLo) > 0
+                for k = 0 to array.size(magLo) - 1
+                    v = array.get(magLo, k)
+                    if v > t1 and (na(runner) or v < runner)
+                        runner := v
+            qty = math.max(1, math.floor(math.min(strategy.equity * riskPct / 100 / risk, strategy.equity * maxPosPct / 100 / ce)))
+            strategy.entry("L", strategy.long, qty = qty, limit = ce, comment = "FVG mid")
+            strategy.exit("T1", "L", qty_percent = partialPct, limit = t1, stop = stop, comment_profit = "4R", comment_loss = "Stop")
+            strategy.exit("Run", "L", limit = useMagnets ? runner : na, stop = stop, comment_profit = "Magnet", comment_loss = "BE/Stop")
+            tStop := stop
+            tT1 := t1
+            tRunner := runner
+            tRecentHigh := hi
+            planned := true
+            if showLines
+                box.new(bar_index - 2, gHi, bar_index + 3, gLo, border_color = color.new(color.blue, 40), bgcolor = color.new(color.blue, 85))
+                if not na(line1)
+                    line.new(tlA, tlAPx, bar_index + 1, line1, color = color.new(color.orange, 0), width = 2)
+if flat and not planned
+    strategy.cancel("L")
+
+// ---------------------------------------------------------------- display
+plot(vwapV, "VWAP", color = color.new(color.purple, 0))
+plot(m >= OPEN_M and m < RTH_END ? orh : na, "Opening-range high", color = color.new(color.orange, 30), style = plot.style_linebr)
+plot(strategy.position_size > 0 ? tStop : na, "Stop", color = color.new(color.red, 0), style = plot.style_linebr)
+plot(strategy.position_size > 0 ? tT1 : na, "4R target", color = color.new(color.green, 0), style = plot.style_linebr)
+plot(strategy.position_size > 0 and useMagnets ? tRunner : na, "Runner magnet", color = color.new(color.teal, 0), style = plot.style_linebr)
+bgcolor(useDaily and not dailyUp ? color.new(color.gray, 92) : na, title = "Daily trend not up")

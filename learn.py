@@ -126,19 +126,28 @@ FACTORS = [
     ("HTF bias aligned", "bias", lambda d: d["bias_aligned"]),
     ("Displacement volume 1.5x+", "vol", lambda d: d["disp_vol"] >= 1.5),
     ("Formed 10:00-11:30", "time", lambda d: d["pts_time"] > 0),
+    ("Trendline retest confluence", "tl", lambda d: as_bool(d["tl_conf"])),
 ]
+# factors recorded only from a given date on: older rows are left out of the comparison
+FACTOR_NEEDS = {"tl": "tl_found"}
 
 
 def factor_stats(d: pd.DataFrame) -> list[dict]:
     t = d[d["sys"] & d["in_win"] & d["triggered"]]
     out = []
     for name, key, fn in FACTORS:
-        m = fn(t).fillna(False).astype(bool)
-        y, n_ = t[m]["r_plan_net"], t[~m]["r_plan_net"]
+        need = FACTOR_NEEDS.get(key)
+        tt = t if not need else t[t[need].notna()] if need in t else t.iloc[0:0]
+        m = fn(tt).fillna(False).astype(bool) if len(tt) else pd.Series(dtype=bool)
+        y, n_ = tt[m]["r_plan_net"], tt[~m]["r_plan_net"]
         out.append({"name": name, "key": key, "n_yes": len(y), "n_no": len(n_),
                     "avg_yes": float(y.mean()) if len(y) else None, "avg_no": float(n_.mean()) if len(n_) else None,
                     "delta": float(y.mean() - n_.mean()) if len(y) and len(n_) else None})
     return out
+
+
+def engine_pad():
+    return E.TL_ZONE_ATR
 
 
 # ----------------------------------------------------------------- review
@@ -250,7 +259,7 @@ def review(kind="Manual", changes=None) -> dict:
             rows.append(mrow(f"{label} · {name}", metrics(dd, rc, tc)))
     table("7. Improvement tests: entry type x stop buffer x filter (net of costs)", HEAD, rows,
           "ote_mid = current entry (middle of the FVG/OTE overlap); fvg_edge = first touch of the gap; fvg_ce = gap midpoint; "
-          "blend = halfway between the gap edge and ote_mid; ote_62 = first touch of the OTE zone. Scaled rows are in R of the "
+          "blend = halfway between the gap edge and ote_mid; ote_62 = first touch of the OTE zone; tl_line = limit at the broken trendline (only setups with trendline confluence). Scaled rows are in R of the "
           "full planned position (a partial fill counts only what filled).")
 
     t = sysq[sysq["triggered"]]
@@ -288,6 +297,42 @@ def review(kind="Manual", changes=None) -> dict:
               "Confirmation entry = wait for price to reach the FVG, then enter on the first bar that closes beyond the "
               f"prior 3 bars (bars used: {tf}). Runner = half at T1, rest to the close with a breakeven stop. "
               "1st/2nd half columns are the out-of-sample check.")
+
+    # Trendline retest confluence (Nov 4): rows recorded since the trendline was added
+    if "tl_found" in sysq:
+        x = sysq[(sysq["session_name"] == "NY") & sysq["tl_found"].notna()].copy()
+        if len(x):
+            for c in ("tl_found", "tl_conf", "tl_retest_fill"):
+                x[c + "_b"] = as_bool(x[c])
+            for c in ("r_tl", "tl_touches", "gap_atr"):
+                x[c] = pd.to_numeric(x.get(c), errors="coerce")
+            x["vwap_ok_b"] = as_bool(x["vwap_ok"]) if "vwap_ok" in x else False
+            v3c = C.TESTS.get("v3") or {}
+            mid = (x["snap_min"] >= 690) & (x["snap_min"] < 870)
+            risk = x["risk_pct"] >= v3c.get("min_risk_pct", 0.3)
+            conf, lng = x["tl_conf_b"], x["side"] == "LONG"
+            filt = {"All (New York, trendline recorded)": x.index == x.index, "No trendline found/broken": ~x["tl_found_b"],
+                    "Trendline found and broken": x["tl_found_b"], "Trendline confluence at snapshot": conf,
+                    "No confluence at snapshot": ~conf, "Confluence, 3+ touches": conf & (x["tl_touches"] >= 3),
+                    "Confluence + longs": conf & lng, "Confluence + midday (11:30-14:30)": conf & mid,
+                    "Confluence + risk 0.3%+": conf & risk, "Confluence + VWAP side": conf & x["vwap_ok_b"],
+                    "Confluence + longs + midday + risk 0.3%+": conf & lng & mid & risk}
+            rows = []
+            for fname, m in filt.items():
+                rows.append(mrow(f"{fname} · current plan", metrics(x[m])))
+            rows.append(mrow("Fill was a trendline retest (any setup)", metrics(x, "r_tl", "tl_retest_fill_b")))
+            rows.append(mrow("Fill was a trendline retest + longs", metrics(x[lng], "r_tl", "tl_retest_fill_b")))
+            for b in C.TESTS["stop_buffers"]:
+                col, tc = f"r_tl_line_{b}", f"trig_tl_line_{b}"
+                if col in x:
+                    x[col] = pd.to_numeric(x[col], errors="coerce"); x[tc + "_b"] = as_bool(x[tc])
+                    rows.append(mrow(f"Entry at the trendline (stop {b} ATR)", metrics(x[conf], col, tc + "_b")))
+            tol = C.TESTS.get("trendline", {}).get("retest_at_fill_atr", 0.3)
+            table("11. Trendline retest confluence (New York session, qualified, net of costs)", HEAD, rows,
+                  "Trendline = the falling line across the lower highs into the sweep (rising line across higher lows for "
+                  "shorts), broken by a close and not failed. Confluence = its level at the snapshot sits in the entry zone "
+                  f"(FVG near edge to entry) within {engine_pad()} ATR. Retest at fill = the line was within {tol} ATR of the "
+                  "fill price when the order filled. Only rows recorded since Nov 4, 2026 (rerun the backtest to fill history).")
 
     ch = changes or []
     table("9. Automatic changes in this run", ["Key", "Old", "New", "Evidence"],
