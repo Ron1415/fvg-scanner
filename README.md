@@ -57,6 +57,12 @@ A day-trading scanner and trainer for the ICT Fair Value Gap strategy on 5-minut
 
 From then on, everything runs on its own on weekdays.
 
+## Trendline-break 1-minute model, long and short (added November 4, 2026)
+
+`tl1m.py` is a bar-by-bar port of the TradingView indicator `FVG_1m_Trendlines.pine`, with settings in `config_tl1m.py` and checks in `test_tl1m.py`. A break of a falling trendline (long) or a rising trendline (short) arms a setup; the order is a limit at the midpoint of an FVG formed around the break, inside the retracement zone, with the VWAP and opening-range filters (daily trend off). The short side runs the long rules on a mirrored chart.
+
+**Run it:** the workflow with mode `tl1m` and 125 days. It writes `review_tl1m.md` (runs, how trades end, what separates winners from losers, candidate stricter entries judged on May-August and September onward) and charts of sample losers and winners to `site/tl_charts/` (GitHub Pages: `/tl_charts/`).
+
 ## 1-minute long model (added November 4, 2026)
 
 A separate, simpler model on 1-minute bars: `fvg1m.py`, settings in `config_1m.py`, checks in `test_fvg1m.py`, and the same rules as a TradingView strategy in `FVG_1m_Strategy.pine`.

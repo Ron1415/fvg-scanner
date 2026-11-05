@@ -1,0 +1,578 @@
+//@version=6
+// FVG 1m Trendlines and FVGs, long and short (Ron, Nov 4, 2026)
+// LONG:  a falling trendline across lower swing highs, broken by a close ABOVE it; a bullish FVG; a limit
+//        buy at the FVG midpoint; stop below the FVG; target 4R above.
+// SHORT: the mirror image. A rising trendline across higher swing lows, broken by a close BELOW it; a
+//        bearish FVG; a limit sell at the midpoint; stop above the FVG; target 4R below.
+// One engine runs both sides: the short side works on mirrored prices, so its rules are exactly the
+// long rules turned upside down.
+//
+// Trendlines (bar by bar; nothing is drawn with hindsight):
+//   - Swing points: a high (or low) with `Swing strength` bars each side that are lower (higher). Each
+//     swing point is known `Swing strength` bars late, so a line appears a couple of bars late.
+//   - A line joins two swing points (the later one lower for a falling line, higher for a rising line),
+//     at least 3 bars apart. It is valid while no close from its first point is beyond it by more than
+//     the tolerance. Most touches wins; then the most recent second point; then the earliest first point.
+//   - Break: a close beyond the line (or N closes in a row, and/or by a margin: see the inputs).
+// FVGs: bullish = 3rd candle's low above the 1st candle's high; bearish = 3rd candle's high below the 1st
+//   candle's low. A box is drawn from the gap candle and extends until filled or expired.
+//   Gaps formed around a trendline break of their own side are highlighted (blue = long, orange = short).
+// Trade preview: after a break, the dotted line extends the broken trendline and the gold zone is the
+//   50-61.8% retracement of the new move. An order is placed at the midpoint of a highlighted FVG when the
+//   filters pass. A grey x marks a setup that price reached but the filters blocked (hover it for the reason).
+// Educational tool only; not financial advice.
+indicator("FVG 1m Trendlines and FVGs", shorttitle = "TL + FVG", overlay = true, max_lines_count = 500,
+     max_labels_count = 300, max_boxes_count = 300, max_bars_back = 1000)
+
+// ---------------------------------------------------------------- inputs
+sides    = input.string("Long and short", "Sides", options = ["Long and short", "Long only", "Short only"])
+pivK     = input.int(2, "Swing strength (bars each side)", minval = 1, maxval = 10, group = "Trendlines")
+minTouch = input.int(2, "Minimum touches", minval = 2, maxval = 6, group = "Trendlines")
+tolAtr   = input.float(0.10, "Touch / poke-through tolerance (x 1-minute ATR)", minval = 0.0, step = 0.05, group = "Trendlines")
+minGap   = input.int(3, "Minimum bars between the two points", minval = 1, group = "Trendlines")
+confirmN = input.int(1, "Closes beyond the line to confirm a break", minval = 1, maxval = 5, group = "Trendlines")
+marginA  = input.float(0.0, "Break must close beyond the line by (x ATR)", minval = 0.0, step = 0.05, group = "Trendlines")
+maxPiv   = input.int(8, "Swing points to consider", minval = 2, maxval = 20, group = "Trendlines")
+showPiv  = input.bool(true, "Show the swing points (dots)", group = "Trendlines")
+showWip  = input.bool(true, "Show a line while it is forming (dotted)", group = "Trendlines")
+keepN    = input.int(30, "Keep the last N broken lines per side", minval = 1, maxval = 150, group = "Trendlines")
+dayReset = input.bool(true, "Start fresh each day", group = "Trendlines")
+showLbl  = input.bool(false, "Show \"TL break\" text labels (off = small triangle only)", group = "Trendlines")
+
+grpF       = "Fair value gaps"
+showBull   = input.bool(true, "Bullish FVGs", group = grpF)
+showBear   = input.bool(true, "Bearish FVGs", group = grpF)
+minPct     = input.float(0.02, "Minimum height (% of price)", minval = 0.0, step = 0.01, group = grpF)
+fillMode   = input.string("Fully filled", "Stop extending when", options = ["Fully filled", "Midpoint reached", "First touch"], group = grpF)
+shrink     = input.bool(true, "Shrink the box as the gap fills", group = grpF)
+showMid    = input.string("TL-break FVGs only", "Midpoint lines (the entry level)", options = ["TL-break FVGs only", "All FVGs", "None"], group = grpF)
+showFilled = input.bool(false, "Keep filled / expired FVGs (faded)", group = grpF)
+maxExt     = input.int(30, "Extend boxes for at most N bars", minval = 3, maxval = 400, group = grpF)
+showTxt    = input.bool(false, "Write \"TL-break FVG\" in the box", group = grpF)
+maxGaps    = input.int(80, "Maximum FVGs on the chart", minval = 5, maxval = 250, group = grpF)
+hlBefore   = input.int(5, "Highlight FVGs formed up to N bars before a trendline break", minval = 0, group = grpF)
+hlAfter    = input.int(15, "...and up to N bars after it", minval = 0, group = grpF)
+
+grpT       = "Trade preview (version 2 exits)"
+showTrades = input.bool(true, "Show the trades the model would take", group = grpT)
+useVwap    = input.bool(true, "Longs above VWAP / shorts below VWAP", group = grpT)
+useOrb     = input.bool(true, "Opening range (9:30-9:45) broken in the trade's direction", group = grpT)
+useDaily   = input.bool(false, "Daily trend in the trade's direction (off for 1-minute trading; for later swing use)", group = grpT)
+useFib     = input.bool(true, "Midpoint at the retracement zone", group = grpT)
+fibLo      = input.float(0.45, "Retracement zone from", step = 0.01, group = grpT)
+fibHi      = input.float(0.70, "Retracement zone to", step = 0.01, group = grpT)
+useTl      = input.bool(false, "Require the broken trendline to run through the FVG at entry", group = grpT)
+tlPadAtr   = input.float(0.25, "Trendline may sit outside the FVG by (x ATR)", step = 0.05, group = grpT)
+maxWait    = input.int(30, "Cancel if no fill within N bars of the break", minval = 1, group = grpT)
+stopAtr    = input.float(0.10, "Stop beyond the FVG by (x ATR)", step = 0.05, group = grpT)
+minRiskPct = input.float(0.20, "Minimum stop distance (% of price)", step = 0.05, group = grpT)
+targetR    = input.float(4.0, "First target (R)", step = 0.5, group = grpT)
+firstFill  = input.int(630, "First fill (minutes after midnight NY; 630 = 10:30)", group = grpT)
+showFib    = input.bool(true, "Draw the 50-61.8% zone of the new move", group = grpT)
+showExt    = input.bool(true, "Extend the broken trendline (dotted)", group = grpT)
+keepOld    = input.bool(true, "Keep the drawings of setups that were not taken (faded)", group = grpT)
+showWhy    = input.bool(true, "Mark setups NOT taken (grey x; hover for the reason)", group = grpT)
+showVwap   = input.bool(true, "Plot VWAP", group = grpT)
+showTable  = input.bool(true, "Results table", group = grpT)
+
+doL = sides != "Short only"
+doS = sides != "Long only"
+cL = #2f6fde
+cS = #e8590c
+cBull = #1a9e6a
+cBear = #d64545
+cGold = #c58a00
+LAST_FILL = 900
+EOD_M = 955
+
+// ---------------------------------------------------------------- series
+NY = "America/New_York"
+newDay = ta.change(dayofmonth(time, NY)) != 0
+mNy = hour(time, NY) * 60 + minute(time, NY)
+atr1 = ta.sma(high - low, 14)
+vwapV = ta.vwap(hlc3)
+ph = ta.pivothigh(high, pivK, pivK)
+pl = ta.pivotlow(low, pivK, pivK)
+[dC1, dS1, dS6] = request.security(syminfo.tickerid, "D", [close[1], ta.sma(close, 20)[1], ta.sma(close, 20)[6]], lookahead = barmerge.lookahead_on)
+dailyUp = dC1 > dS1 and dS1 > dS6
+dailyDn = dC1 < dS1 and dS1 < dS6
+
+var float orh = na
+var float orl = na
+var bool orUp = false
+var bool orDn = false
+if newDay
+    orh := na
+    orl := na
+    orUp := false
+    orDn := false
+if mNy >= 570 and mNy < 585
+    orh := na(orh) ? high : math.max(orh, high)
+    orl := na(orl) ? low : math.min(orl, low)
+if mNy >= 585 and not na(orh)
+    orUp := orUp or close > orh
+    orDn := orDn or close < orl
+
+// mirrored prices: d = 1 (long) uses prices as they are; d = -1 (short) turns the chart upside down
+hiT(int d, int o) => d == 1 ? high[o] : -low[o]
+loT(int d, int o) => d == 1 ? low[o] : -high[o]
+clT(int d, int o) => d == 1 ? close[o] : -close[o]
+
+// ---------------------------------------------------------------- trendline engine
+type TL
+    int d
+    array<int> pIdx
+    array<float> pVal
+    array<line> broken
+    bool active = false
+    int la = 0
+    float lpx = na
+    float lsl = na
+    int lt = 0
+    line cur = na
+    int lastBreak = -1
+    int aboveN = 0
+    int breakBar = -100000
+    bool brokeNow = false
+
+method at(TL t, int x) => t.lpx + t.lsl * (x - t.la)
+
+tlStep(TL t, float pvT, bool on) =>
+    t.brokeNow := false
+    if on
+        col = t.d == 1 ? cL : cS
+        if newDay and dayReset
+            t.pIdx.clear()
+            t.pVal.clear()
+            t.active := false
+            t.cur := na
+            t.lastBreak := bar_index - 1
+        if t.active
+            lv = t.at(bar_index)
+            t.aboveN := clT(t.d, 0) > lv + marginA * atr1 ? t.aboveN + 1 : 0
+            if t.aboveN >= confirmN
+                t.brokeNow := true
+                t.aboveN := 0
+                line.set_xy2(t.cur, bar_index, t.d * lv)
+                line.set_style(t.cur, line.style_solid)
+                line.set_color(t.cur, color.new(col, 0))
+                if showLbl
+                    label.new(bar_index, t.d == 1 ? low : high, "TL break\n" + str.tostring(t.lt) + " touches",
+                         style = t.d == 1 ? label.style_label_up : label.style_label_down,
+                         color = color.new(col, 10), textcolor = color.white, size = size.small)
+                t.broken.push(t.cur)
+                if t.broken.size() > keepN
+                    line.delete(t.broken.shift())
+                t.active := false
+                t.cur := na
+                t.lastBreak := bar_index
+                t.breakBar := bar_index
+                t.pIdx.clear()
+                t.pVal.clear()
+            else
+                line.set_xy2(t.cur, bar_index, t.d * lv)
+        if not na(pvT) and not t.brokeNow and bar_index - pivK > t.lastBreak
+            t.pIdx.push(bar_index - pivK)
+            t.pVal.push(pvT)
+            if t.pIdx.size() > maxPiv
+                t.pIdx.shift()
+                t.pVal.shift()
+            n = t.pIdx.size()
+            tol = tolAtr * atr1
+            bestKey = -1.0
+            int ba = na
+            float bpx = na
+            float bsl = na
+            int bt = 0
+            if n >= 2
+                for x = 0 to n - 2
+                    a = t.pIdx.get(x)
+                    ha = t.pVal.get(x)
+                    for y = x + 1 to n - 1
+                        b = t.pIdx.get(y)
+                        hb = t.pVal.get(y)
+                        if hb < ha and b - a >= minGap and bar_index - a < 400
+                            sl = (hb - ha) / (b - a)
+                            ok = true
+                            for j = a to bar_index
+                                if clT(t.d, bar_index - j) > ha + sl * (j - a) + tol
+                                    ok := false
+                                    break
+                            if ok
+                                tc = 0
+                                for z = x to n - 1
+                                    pz = t.pIdx.get(z)
+                                    if math.abs(t.pVal.get(z) - (ha + sl * (pz - a))) <= tol
+                                        tc += 1
+                                if tc >= minTouch
+                                    key = tc * 1e7 + (b - bar_index + 1000) * 1e3 + (bar_index - a)
+                                    if key > bestKey
+                                        bestKey := key
+                                        ba := a
+                                        bpx := ha
+                                        bsl := sl
+                                        bt := tc
+            if not na(ba)
+                if not na(t.cur)
+                    line.delete(t.cur)
+                t.la := ba
+                t.lpx := bpx
+                t.lsl := bsl
+                t.lt := bt
+                t.active := true
+                t.aboveN := 0
+                t.cur := line.new(t.la, t.d * t.lpx, bar_index, t.d * t.at(bar_index), color = color.new(col, showWip ? 30 : 100),
+                     width = 2, style = line.style_dotted)
+    t.brokeNow
+
+var tlL = TL.new(d = 1, pIdx = array.new<int>(), pVal = array.new<float>(), broken = array.new<line>())
+var tlS = TL.new(d = -1, pIdx = array.new<int>(), pVal = array.new<float>(), broken = array.new<line>())
+brkL = tlStep(tlL, ph, doL)
+brkS = tlStep(tlS, na(pl) ? na : -pl, doS)
+
+// ---------------------------------------------------------------- fair value gaps
+type Gap
+    box bx
+    line md
+    bool bull
+    bool live
+    bool hl
+    float top
+    float bot
+    float top0
+    float bot0
+    float mid
+    int born
+    float ext          // bullish: lowest low since the gap formed; bearish: highest high
+
+var gaps = array.new<Gap>()
+
+paint(Gap g) =>
+    col = g.hl ? (g.bull ? cL : cS) : g.bull ? cBull : cBear
+    box.set_bgcolor(g.bx, color.new(col, g.live ? (g.hl ? 70 : 85) : 94))
+    box.set_border_color(g.bx, color.new(col, g.live ? (g.hl ? 10 : 60) : 85))
+    box.set_text(g.bx, g.hl and showTxt ? "TL-break FVG" : "")
+    midOn = showMid == "All FVGs" or (showMid == "TL-break FVGs only" and g.hl)
+    line.set_color(g.md, midOn ? color.new(col, g.live ? (g.hl ? 0 : 40) : 85) : color.new(col, 100))
+
+if bar_index >= 2
+    if showBull and low > high[2] and low - high[2] >= minPct / 100 * close
+        t = low
+        b = high[2]
+        mi = bar_index - 1
+        g = Gap.new(box.new(bar_index - 1, t, bar_index, b, text_size = size.tiny, text_color = cL, text_halign = text.align_right, text_valign = text.align_top),
+             line.new(bar_index - 1, (t + b) / 2, bar_index, (t + b) / 2, style = line.style_dashed),
+             true, true, doL and mi >= tlL.breakBar and mi - tlL.breakBar <= hlAfter, t, b, t, b, (t + b) / 2, mi, t)
+        paint(g)
+        gaps.push(g)
+    if showBear and high < low[2] and low[2] - high >= minPct / 100 * close
+        t = low[2]
+        b = high
+        mi = bar_index - 1
+        g = Gap.new(box.new(bar_index - 1, t, bar_index, b, text_size = size.tiny, text_color = cS, text_halign = text.align_right, text_valign = text.align_bottom),
+             line.new(bar_index - 1, (t + b) / 2, bar_index, (t + b) / 2, style = line.style_dashed),
+             false, true, doS and mi >= tlS.breakBar and mi - tlS.breakBar <= hlAfter, t, b, t, b, (t + b) / 2, mi, b)
+        paint(g)
+        gaps.push(g)
+
+// a break on this bar: highlight its side's gaps that formed just before it
+if (brkL or brkS) and gaps.size() > 0
+    for i = 0 to gaps.size() - 1
+        g = gaps.get(i)
+        if g.live and not g.hl and g.born >= bar_index - hlBefore and ((g.bull and brkL) or (not g.bull and brkS))
+            g.hl := true
+            paint(g)
+
+// extend, shrink as they fill, stop once filled or expired
+if gaps.size() > 0
+    for i = gaps.size() - 1 to 0
+        g = gaps.get(i)
+        if g.live and (bar_index - g.born > maxExt or (newDay and dayReset))
+            g.live := false
+            if showFilled
+                paint(g)
+            else
+                box.delete(g.bx)
+                line.delete(g.md)
+        else if g.live and bar_index > g.born + 1
+            if g.bull
+                g.ext := math.min(g.ext, low)
+                if shrink and low < g.top
+                    g.top := math.max(low, g.bot)
+                    box.set_top(g.bx, g.top)
+                g.live := not (fillMode == "Fully filled" ? low <= g.bot0 : fillMode == "Midpoint reached" ? low <= g.mid : low < g.top0)
+            else
+                g.ext := math.max(g.ext, high)
+                if shrink and high > g.bot
+                    g.bot := math.min(high, g.top)
+                    box.set_bottom(g.bx, g.bot)
+                g.live := not (fillMode == "Fully filled" ? high >= g.top0 : fillMode == "Midpoint reached" ? high >= g.mid : high > g.bot0)
+            box.set_right(g.bx, bar_index)
+            line.set_x2(g.md, bar_index)
+            if not g.live
+                if showFilled
+                    paint(g)
+                else
+                    box.delete(g.bx)
+                    line.delete(g.md)
+        else if g.live
+            box.set_right(g.bx, bar_index)
+            line.set_x2(g.md, bar_index)
+    while gaps.size() > maxGaps
+        old = gaps.shift()
+        box.delete(old.bx)
+        line.delete(old.md)
+
+// ---------------------------------------------------------------- trade preview (one engine, both sides)
+type Trade
+    int d
+    int st = 0                 // 0 idle, 1 armed (waiting for the pullback), 2 in a trade
+    int brk = 0
+    float legLow = na          // all prices below are mirrored for shorts (see hiT / loT)
+    int legLowBar = 0
+    float pend = na
+    float pStop = na
+    float pHigh = na
+    float ent = na
+    float stp = na
+    float risk = na
+    float tgt = na
+    float recHi = na
+    float banked = 0.0
+    bool half = false
+    line lE = na
+    line lS = na
+    line lT = na
+    float tA = na
+    float tPx = na
+    float tSl = na
+    line ext = na
+    box fz = na
+    line f50 = na
+    float lastMid = na
+    string lastWhy = ""
+    float blockedMid = na
+    int cV = 0
+    int cO = 0
+    int cD = 0
+    int cF = 0
+    int cT = 0
+    int cH = 0
+    int nTr = 0
+    int nWin = 0
+    float sumR = 0.0
+    bool entryNow = false
+    bool tgtNow = false
+    bool exitNow = false
+    float exitR = na
+
+method lineT(Trade tr, int x) => tr.tPx + tr.tSl * (x - tr.tA)
+
+retire(Trade tr) =>
+    col = tr.d == 1 ? cL : cS
+    if keepOld
+        line.set_color(tr.ext, color.new(col, 75))
+        box.set_bgcolor(tr.fz, color.new(cGold, 93))
+        box.set_border_color(tr.fz, color.new(cGold, 80))
+        line.set_color(tr.f50, color.new(cGold, 75))
+    else
+        line.delete(tr.ext)
+        box.delete(tr.fz)
+        line.delete(tr.f50)
+    tr.ext := na
+    tr.fz := na
+    tr.f50 := na
+
+tradeStep(Trade tr, TL t, bool brokeNow, bool okOr, bool okDaily, bool on) =>
+    tr.entryNow := false
+    tr.tgtNow := false
+    tr.exitNow := false
+    tr.exitR := na
+    if on
+        d = tr.d
+        H = hiT(d, 0)
+        L = loT(d, 0)
+        O = d * open
+        C = d * close
+        V = d * vwapV
+        col = d == 1 ? cL : cS
+        // 1. manage an open trade (bars after the fill bar)
+        if tr.st == 2
+            float px = na
+            if mNy >= EOD_M or newDay
+                px := C
+            else if L <= tr.stp
+                px := math.min(tr.stp, O)
+            else
+                if not tr.half and H >= tr.tgt
+                    tr.half := true
+                    tr.banked := 0.5 * targetR
+                    tr.tgtNow := true
+                if C > tr.recHi or tr.half
+                    tr.stp := math.max(tr.stp, tr.ent)
+            if not na(px)
+                tr.exitR := (px - tr.ent) / tr.risk * (tr.half ? 0.5 : 1.0) + tr.banked
+                tr.exitNow := true
+                tr.st := 0
+            line.set_x2(tr.lE, bar_index)
+            line.set_x2(tr.lS, bar_index)
+            line.set_x2(tr.lT, bar_index)
+        // 2. the order placed at the last close fills on this bar? (needs a 1-tick trade-through)
+        else if tr.st == 1 and not na(tr.pend)
+            if L <= tr.pend - syminfo.mintick and mNy < LAST_FILL
+                tr.ent := math.min(tr.pend, O)
+                tr.risk := tr.ent - tr.pStop
+                tr.stp := tr.pStop
+                tr.tgt := tr.ent + targetR * tr.risk
+                tr.recHi := tr.pHigh
+                tr.half := false
+                tr.banked := 0.0
+                tr.st := 2
+                tr.entryNow := true
+                tr.lE := line.new(bar_index, d * tr.ent, bar_index, d * tr.ent, color = color.new(col, 0), width = 2)
+                tr.lS := line.new(bar_index, d * tr.stp, bar_index, d * tr.stp, color = color.new(cBear, 0), width = 2)
+                tr.lT := line.new(bar_index, d * tr.tgt, bar_index, d * tr.tgt, color = color.new(cBull, 0), width = 2)
+                if L <= tr.stp                 // the fill bar itself can only stop out
+                    tr.exitR := -1.0
+                    tr.exitNow := true
+                    tr.st := 0
+            tr.pend := na
+        // 2b. price reached a setup midpoint while no order was working: record why
+        else if tr.st == 1 and not na(tr.lastMid) and (na(tr.blockedMid) or tr.lastMid != tr.blockedMid) and L <= tr.lastMid - syminfo.mintick and tr.lastWhy != ""
+            tr.blockedMid := tr.lastMid
+            tr.cV += str.contains(tr.lastWhy, "VWAP") ? 1 : 0
+            tr.cO += str.contains(tr.lastWhy, "opening range") ? 1 : 0
+            tr.cD += str.contains(tr.lastWhy, "daily") ? 1 : 0
+            tr.cF += str.contains(tr.lastWhy, "retracement") ? 1 : 0
+            tr.cT += str.contains(tr.lastWhy, "trendline") ? 1 : 0
+            tr.cH += str.contains(tr.lastWhy, "time") ? 1 : 0
+            if showWhy
+                label.new(bar_index, d == 1 ? low : high, "", style = label.style_xcross, color = color.new(color.gray, 0),
+                     size = size.tiny, tooltip = (d == 1 ? "LONG" : "SHORT") + " not taken: " + tr.lastWhy)
+        // 3. a trendline break arms a new setup
+        if brokeNow and tr.st != 2
+            if tr.st == 1
+                retire(tr)
+            tr.st := 1
+            tr.brk := bar_index
+            tr.tA := t.la
+            tr.tPx := t.lpx
+            tr.tSl := t.lsl
+            tr.lastMid := na
+            tr.lastWhy := ""
+            tr.ext := showExt ? line.new(bar_index, d * tr.lineT(bar_index), bar_index, d * tr.lineT(bar_index), color = color.new(col, 20), width = 2, style = line.style_dotted) : na
+            tr.legLow := L
+            tr.legLowBar := bar_index
+            for j = t.la to bar_index
+                lj = loT(d, bar_index - j)
+                if lj <= tr.legLow
+                    tr.legLow := lj
+                    tr.legLowBar := j
+        // 4. armed: cancel, or plan the limit order for the next bar
+        if tr.st == 1
+            if L < tr.legLow or bar_index - tr.brk > maxWait or mNy >= LAST_FILL or newDay
+                tr.st := 0
+                retire(tr)
+            else
+                hi = H
+                for j = tr.legLowBar to bar_index
+                    hi := math.max(hi, hiT(d, bar_index - j))
+                leg = hi - tr.legLow
+                if showFib and leg > 0
+                    z50 = d * (hi - 0.5 * leg)
+                    z618 = d * (hi - 0.618 * leg)
+                    if na(tr.fz)
+                        tr.fz := box.new(tr.legLowBar, math.max(z50, z618), bar_index + 1, math.min(z50, z618), border_color = color.new(cGold, 40), bgcolor = color.new(cGold, 85))
+                        tr.f50 := line.new(tr.legLowBar, z50, bar_index + 1, z50, color = color.new(cGold, 20), style = line.style_dashed)
+                    else
+                        box.set_top(tr.fz, math.max(z50, z618))
+                        box.set_bottom(tr.fz, math.min(z50, z618))
+                        box.set_right(tr.fz, bar_index + 1)
+                        line.set_y1(tr.f50, z50)
+                        line.set_y2(tr.f50, z50)
+                        line.set_x2(tr.f50, bar_index + 1)
+                line.set_xy2(tr.ext, bar_index + 1, d * tr.lineT(bar_index + 1))
+                bestScore = 1e9
+                float gMid = na
+                float gBot = na
+                float gTop = na
+                float gRet = na
+                if leg > 0 and gaps.size() > 0
+                    for i = 0 to gaps.size() - 1
+                        g = gaps.get(i)
+                        if g.bull == (d == 1) and g.hl and g.live and g.born >= tr.brk - hlBefore and bar_index > g.born + 1
+                            midT = d * g.mid
+                            botT = d == 1 ? g.bot0 : -g.top0       // the stop side of the gap
+                            topT = d == 1 ? g.top0 : -g.bot0
+                            if d * g.ext > midT                     // midpoint not traded yet
+                                r = (hi - midT) / leg
+                                sc = (r >= fibLo and r <= fibHi ? 0.0 : 1000.0) + math.abs(r - 0.559)
+                                if sc < bestScore
+                                    bestScore := sc
+                                    gMid := midT
+                                    gBot := botT
+                                    gTop := topT
+                                    gRet := r
+                tr.lastMid := gMid
+                tr.lastWhy := ""
+                if not na(gMid)
+                    tlNext = tr.lineT(bar_index + 1)
+                    okV = not useVwap or gMid > V
+                    okO = not useOrb or okOr
+                    okD = not useDaily or okDaily
+                    okF = not useFib or (gRet >= fibLo and gRet <= fibHi)
+                    okT = not useTl or (tlNext >= gBot - tlPadAtr * atr1 and tlNext <= gTop + tlPadAtr * atr1)
+                    okH = mNy >= firstFill - 1 and mNy < LAST_FILL - 1
+                    tr.lastWhy := (okV ? "" : (d == 1 ? "below" : "above") + " VWAP (" + str.tostring(vwapV, format.mintick) + "); ") +
+                         (okO ? "" : "opening range not broken " + (d == 1 ? "upward" : "downward") + "; ") +
+                         (okD ? "" : "daily trend not " + (d == 1 ? "up" : "down") + "; ") +
+                         (okF ? "" : "retracement " + str.tostring(gRet * 100, "#") + "% (outside " + str.tostring(fibLo * 100, "#") + "-" + str.tostring(fibHi * 100, "#") + "%); ") +
+                         (okT ? "" : "broken trendline at " + str.tostring(d * tlNext, format.mintick) + ", not at the FVG; ") +
+                         (okH ? "" : "outside the fill time; ")
+                    if okV and okO and okD and okF and okT and okH
+                        tr.pend := gMid
+                        tr.pStop := math.min(gBot - stopAtr * atr1, gMid - minRiskPct / 100 * math.abs(gMid))
+                        tr.pHigh := hi
+        if tr.exitNow
+            tr.nTr += 1
+            tr.sumR += tr.exitR
+            tr.nWin += tr.exitR > 0 ? 1 : 0
+    tr.exitNow
+
+var trL = Trade.new(d = 1)
+var trS = Trade.new(d = -1)
+tradeStep(trL, tlL, brkL, orUp, dailyUp, doL and showTrades)
+tradeStep(trS, tlS, brkS, orDn, dailyDn, doS and showTrades)
+
+// ---------------------------------------------------------------- markers, alerts, table
+plotshape(showPiv and doL ? ph : na, "Swing high", style = shape.circle, location = location.absolute, color = color.new(color.orange, 0), size = size.tiny, offset = -pivK)
+plotshape(showPiv and doS ? pl : na, "Swing low", style = shape.circle, location = location.absolute, color = color.new(#a855f7, 0), size = size.tiny, offset = -pivK)
+plotshape(brkL and not showLbl, "Falling trendline broken (long)", style = shape.triangleup, location = location.belowbar, color = color.new(cL, 0), size = size.tiny)
+plotshape(brkS and not showLbl, "Rising trendline broken (short)", style = shape.triangledown, location = location.abovebar, color = color.new(cS, 0), size = size.tiny)
+plotshape(trL.entryNow, "Long entry", style = shape.triangleup, location = location.belowbar, color = color.new(cBull, 0), size = size.small)
+plotshape(trS.entryNow, "Short entry", style = shape.triangledown, location = location.abovebar, color = color.new(cBear, 0), size = size.small)
+plotshape(trL.tgtNow or trS.tgtNow, "4R reached (half sold)", style = shape.diamond, location = location.abovebar, color = color.new(cBull, 0), size = size.tiny)
+plotshape(trL.exitNow, "Long exit", style = shape.xcross, location = location.abovebar, color = trL.exitR > 0 ? color.new(cBull, 0) : color.new(cBear, 0), size = size.tiny)
+plotshape(trS.exitNow, "Short exit", style = shape.xcross, location = location.belowbar, color = trS.exitR > 0 ? color.new(cBull, 0) : color.new(cBear, 0), size = size.tiny)
+plot(showVwap ? vwapV : na, "VWAP", color = color.new(#7c3aed, 0), linewidth = 1)
+alertcondition(brkL, "Falling trendline broken", "1-minute close above a falling trendline")
+alertcondition(brkS, "Rising trendline broken", "1-minute close below a rising trendline")
+alertcondition(trL.entryNow, "Long entry", "Long limit filled at the TL-break FVG midpoint")
+alertcondition(trS.entryNow, "Short entry", "Short limit filled at the TL-break FVG midpoint")
+
+var table tb = table.new(position.top_right, 3, 6, bgcolor = color.new(color.white, 10), border_width = 1, border_color = color.new(color.gray, 70))
+cellRow(int row, string name, string vL, string vS) =>
+    table.cell(tb, 0, row, name, text_size = size.small)
+    table.cell(tb, 1, row, vL, text_size = size.small)
+    table.cell(tb, 2, row, vS, text_size = size.small)
+fmtWin(Trade tr) => tr.nTr > 0 ? str.tostring(100.0 * tr.nWin / tr.nTr, "#.0") + "%" : "-"
+fmtAvg(Trade tr) => tr.nTr > 0 ? str.tostring(tr.sumR / tr.nTr, "#.00") : "-"
+fmtBlk(Trade tr) => "VWAP " + str.tostring(tr.cV) + " · OR " + str.tostring(tr.cO) + " · daily " + str.tostring(tr.cD) +
+     " · fib " + str.tostring(tr.cF) + " · TL " + str.tostring(tr.cT) + " · time " + str.tostring(tr.cH)
+if showTable and barstate.islast
+    cellRow(0, "", "Long", "Short")
+    cellRow(1, "Trades", str.tostring(trL.nTr), str.tostring(trS.nTr))
+    cellRow(2, "Win rate", fmtWin(trL), fmtWin(trS))
+    cellRow(3, "Avg R (before costs)", fmtAvg(trL), fmtAvg(trS))
+    cellRow(4, "Total R", str.tostring(trL.sumR, "#.0"), str.tostring(trS.sumR, "#.0"))
+    cellRow(5, "Not taken, blocked by", fmtBlk(trL), fmtBlk(trS))

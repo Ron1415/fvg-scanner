@@ -248,7 +248,7 @@ def run_day(day: list, hist: list, b15: list, up: bool, cfg: dict | None = None)
             if p1 not in used and H[p0] > H[p1] and C[i] > H[p1] and all(C[j] <= H[p1] for j in range(p1 + 1, i)):
                 used.add(p1)
                 l0 = min(range(p1, i + 1), key=lambda j: (L[j], -j))
-                setup = {"bos_i": i, "bos_min": b.min, "l0": l0, "low": L[l0], "broken_high": H[p1],
+                setup = {"bos_i": i, "bos_min": b.min, "l0": l0, "low": L[l0], "broken_high": H[p1], "p1": p1,
                          "tl": trendline(H, C, piv, l0, atr[i])}
         if setup is None:
             continue
@@ -291,11 +291,15 @@ def run_day(day: list, hist: list, b15: list, up: bool, cfg: dict | None = None)
         if all(flags[r] for r, on in rules.items() if on) and day[min(i + 1, n - 1)].min >= K.ENTRY_START:
             order = {"date": b.date, "bos_time": hm(setup["bos_min"]), "entry": ce, "stop": stop,
                      "gap_lo": gap_lo, "gap_hi": gap_hi, "swing_low": setup["low"], "recent_high": hi, "fib_ret": ret,
-                     "tl_touches": tl[2] if tl else 0, "vwap": float(vwap[i]), **{f"f_{r}": v for r, v in flags.items()}}
+                     "tl_touches": tl[2] if tl else 0, "vwap": float(vwap[i]), **{f"f_{r}": v for r, v in flags.items()},
+                     # chart geometry (bar indexes within the day): broken swing high, break bar, swing low,
+                     # FVG middle candle, trendline anchor and slope per bar
+                     "g_p1": setup["p1"], "g_bos": setup["bos_i"], "g_l0": setup["l0"], "g_gap": j,
+                     "g_tl_a": tl[0] if tl else None, "g_tl_px": H[tl[0]] if tl else None, "g_tl_slope": tl[1] if tl else None}
     for t in trades:
         t["risk_pct"] = (t["entry"] - t["stop"]) / t["entry"] * 100
         t["fill_time"], t["exit_time"] = hm(t.pop("fill_min")), hm(t.pop("exit_min"))
-        t.pop("fill_i", None)
+        t["g_fill"] = t.pop("fill_i", None)
     return trades
 
 
