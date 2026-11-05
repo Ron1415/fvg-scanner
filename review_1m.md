@@ -1,4 +1,4 @@
-# 1-minute FVG model review (version 3): 2026-11-04 18:33 ET
+# 1-minute FVG model review (version 3): 2026-11-04 20:23 ET
 
 Data: Alpaca 1-minute (SIP), 2026-05-07 to 2026-11-03, 74 symbols (stocks plus SPY). Long only. Avg R is net of the standard cost (0.02% per side). Realistic cost = limit orders free, $0.01/share on stops and the close. Fills 10:30-15:00; a limit fills only if price trades $0.01 through it.
 
