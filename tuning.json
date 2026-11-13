@@ -1,0 +1,9 @@
+{
+ "version": 2,
+ "weights": {
+  "tl": 12
+ },
+ "filters": {
+  "min_rr_t2": 2.25
+ }
+}

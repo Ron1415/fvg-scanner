@@ -1,0 +1,20 @@
+[
+ {
+  "changed_at": "2026-11-13 16:59 ET",
+  "version": 2,
+  "section": "weights",
+  "key": "tl",
+  "old": 10,
+  "new": 12,
+  "why": "Trendline retest confluence: 0.16R with (n=37) vs -0.22R without (n=292)"
+ },
+ {
+  "changed_at": "2026-11-13 16:59 ET",
+  "version": 2,
+  "section": "filters",
+  "key": "min_rr_t2",
+  "old": 2.0,
+  "new": 2.25,
+  "why": "Setups just above the R:R filter averaged -0.15R (n=352)"
+ }
+]
