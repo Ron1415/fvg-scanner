@@ -16,5 +16,23 @@
   "old": 2.0,
   "new": 2.25,
   "why": "Setups just above the R:R filter averaged -0.15R (n=352)"
+ },
+ {
+  "changed_at": "2026-11-20 16:31 ET",
+  "version": 3,
+  "section": "weights",
+  "key": "tl",
+  "old": 12,
+  "new": 14,
+  "why": "Trendline retest confluence: 0.08R with (n=62) vs -0.27R without (n=581)"
+ },
+ {
+  "changed_at": "2026-11-20 16:31 ET",
+  "version": 3,
+  "section": "weights",
+  "key": "rr",
+  "old": 10,
+  "new": 8,
+  "why": "R:R to T1 of 2 or more: -0.28R with (n=476) vs -0.13R without (n=5652)"
  }
 ]
